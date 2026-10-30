@@ -5,7 +5,16 @@ Milestone 1: infrastructure, contracts, and an executable **mock** workflow. No 
 
 Contributors and agents: read the [code quality policy](docs/code-quality.md) first.
 
-See [docs/project-state.md](docs/project-state.md), [docs/architecture.md](docs/architecture.md), [docs/local-development.md](docs/local-development.md), [docs/validation-report.md](docs/validation-report.md), and [AGENTS.md](AGENTS.md).
+## Architecture reading order
+
+1. [Overview](docs/architecture/overview.md): what runs today (mock agents), implemented vs planned, data ownership, glossary.
+2. [Workflows](docs/architecture/workflows.md): states, human approval, retries, a complete mock example.
+3. [Modules](docs/architecture/modules.md): packages, stubs, and where to change things.
+4. [Security](docs/architecture/security.md): trust boundaries and limits.
+5. [Decisions](docs/decisions/README.md): the five ADRs.
+
+Also: [project state and roadmap](docs/project-state.md), [local development](docs/local-development.md),
+[code quality](docs/code-quality.md), [validation report](docs/validation-report.md), and [AGENTS.md](AGENTS.md).
 
 ## Quick start
 
@@ -49,7 +58,7 @@ pnpm cli status run-demo-1
 `approve`/`reject` sign the decision (Ed25519) for the current review gate and exact result digests, then submit it as a
 Temporal Update. If the gate is not open yet, the decision was rejected (stale, wrong run, expired, replayed, bad signature),
 the CLI prints why and exits non-zero. Nothing is buffered for later. This authorizes a trusted human-controlled signer; it is not
-proof that a biological person clicked a button (see `docs/architecture.md`).
+proof that a biological person clicked a button (see [security](docs/architecture/security.md)).
 
 If an agent execution is left `uncertain` (it may have run but no result was stored), the run fails instead of silently re-running:
 

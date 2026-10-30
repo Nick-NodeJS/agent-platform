@@ -33,6 +33,7 @@ results) when you finish. Summary of the rules:
 - Real execution must never silently fall back to mock; unconfigured profiles are rejected at the executor boundary (`assertProfileConfigured`).
 - Task storage goes through the `TaskStore` interface (local files now, Jira later). Execution goes through `AgentExecutor` (mock now, OpenHands later).
 - Do not add packages/services without a real responsibility; mark deferred integrations clearly.
+- Keep the architecture documents true: a change to behavior, contracts, persistence, permissions or deployment must update the relevant page in `docs/architecture/` and, when it changes a decision, add or supersede an ADR in `docs/decisions/`. Purely cosmetic edits need no ADR.
 
 ## Verification commands
 
