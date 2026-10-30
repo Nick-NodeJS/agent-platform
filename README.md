@@ -3,6 +3,8 @@
 Reusable orchestration engine for an AI agent department (TypeScript, pnpm monorepo, Temporal, PostgreSQL).
 Milestone 1: infrastructure, contracts, and an executable **mock** workflow. No paid LLM calls.
 
+Contributors and agents: read the [code quality policy](docs/code-quality.md) first.
+
 See [docs/project-state.md](docs/project-state.md), [docs/architecture.md](docs/architecture.md), [docs/local-development.md](docs/local-development.md), [docs/validation-report.md](docs/validation-report.md), and [AGENTS.md](AGENTS.md).
 
 ## Quick start

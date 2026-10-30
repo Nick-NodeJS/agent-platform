@@ -48,23 +48,34 @@ export const approvalEnvelopeSchema = z
   .strict();
 export type ApprovalEnvelope = z.infer<typeof approvalEnvelopeSchema>;
 
-export interface DecisionAck {
-  accepted: true;
-  gateId: string;
-  decision: 'approve' | 'reject';
-  decisionId: string;
-}
+export const decisionAckSchema = z
+  .object({
+    accepted: z.literal(true),
+    gateId: idSchema,
+    decision: z.enum(['approve', 'reject']),
+    decisionId: idSchema,
+  })
+  .strict();
+export type DecisionAck = z.infer<typeof decisionAckSchema>;
 
 /** Deterministic JSON with sorted keys; the byte string that is signed and digested. */
 export function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value && typeof value === 'object')
-    return `{${Object.entries(value as Record<string, unknown>)
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value)
       .filter(([, v]) => v !== undefined)
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`)
       .join(',')}}`;
+  }
   return JSON.stringify(value);
+}
+
+/** Canonical JSON round-trip: a plain, key-sorted object safe to store and to digest. */
+export function toCanonicalObject(value: unknown): Record<string, unknown> {
+  return z.record(z.unknown()).parse(JSON.parse(canonicalJson(value)));
 }
 
 /** Order-insensitive equality of two artifact reference lists. */
@@ -72,4 +83,43 @@ export function sameArtifacts(a: ArtifactRef[], b: ArtifactRef[]): boolean {
   const norm = (x: ArtifactRef[]) =>
     canonicalJson([...x].sort((p, q) => (p.resultId < q.resultId ? -1 : 1)));
   return norm(a) === norm(b);
+}
+
+export type GateCheck =
+  { ok: true; envelope: ApprovalEnvelope; gate: ReviewGate } | { ok: false; reason: string };
+
+/**
+ * Deterministic, I/O-free structural check of a decision against the currently open review gate.
+ * Used by the workflow's Update validator (and again after asynchronous verification), so it must stay pure.
+ * Cryptographic verification happens separately in an Activity.
+ */
+export function checkDecisionAgainstGate(
+  raw: unknown,
+  state: { runId: string; gate: ReviewGate | undefined; alreadyAccepted: boolean },
+): GateCheck {
+  const { runId, gate, alreadyAccepted } = state;
+  if (!gate) {
+    return {
+      ok: false,
+      reason: 'review gate is not open yet; submit a fresh decision once the run is waiting',
+    };
+  }
+  if (alreadyAccepted) {
+    return { ok: false, reason: 'a decision was already accepted for this gate' };
+  }
+  const parsed = approvalEnvelopeSchema.safeParse(raw);
+  if (!parsed.success) {
+    return { ok: false, reason: 'malformed approval envelope' };
+  }
+  const { payload } = parsed.data;
+  if (payload.runId !== runId) {
+    return { ok: false, reason: 'decision is for a different run' };
+  }
+  if (payload.gateId !== gate.gateId) {
+    return { ok: false, reason: 'decision is for a different (stale) gate' };
+  }
+  if (!sameArtifacts(payload.artifacts, gate.artifacts)) {
+    return { ok: false, reason: 'decision is for different artifacts than the current gate' };
+  }
+  return { ok: true, envelope: parsed.data, gate };
 }

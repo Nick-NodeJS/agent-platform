@@ -16,10 +16,18 @@ export function redactString(value: string): string {
   );
 }
 
-export function redactDeep<T>(value: T): T {
-  if (typeof value === 'string') return redactString(value) as T;
-  if (Array.isArray(value)) return value.map(redactDeep) as T;
-  if (value && typeof value === 'object')
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redactDeep(v)])) as T;
+/** Redacts secret-looking strings anywhere in a JSON-like value. Callers re-parse the result with their schema. */
+export function redactDeep(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return redactString(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(redactDeep);
+  }
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, redactDeep(entry)]),
+    );
+  }
   return value;
 }

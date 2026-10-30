@@ -21,6 +21,14 @@ Monorepo, contracts, local task store, mock executor, Postgres persistence + mig
 3. Durable, fenced agent executions: reuse on retry, `uncertain` instead of blind re-runs, actual attempt accounting.
 4. Cross-process task file locking with forward-only status ordering and rebuildable Markdown.
 
+## Code-quality scope
+
+Policy in `docs/code-quality.md` (linked from `AGENTS.md` and `README.md`), enforced by type-aware ESLint (no suppression
+comments), a typecheck covering tests/scripts/fixtures, Vitest coverage thresholds (80% lines / 80% branches, measured
+87.83% / 80.77%) and CI. A bounded readability pass split the CLI into commands, typed the executor contract, parsed database rows
+and converted the smoke script and child-process fixture to TypeScript. `loadPolicyContext` (`@platform/agents`) is the explicit path
+for giving the policy to future platform-spawned coding/review agents.
+
 ## Unresolved / blockers
 
 - OpenHands Agent Server container setup not verified; no Compose service (see `docs/architecture.md`).
@@ -28,7 +36,8 @@ Monorepo, contracts, local task store, mock executor, Postgres persistence + mig
 - Container/network/user isolation for agents is a documented plan only (`docs/architecture.md`); it must be enforced before any real agent execution. Signing does not protect against an agent running as the approver's OS user.
 - Exactly-once billing cannot be guaranteed by Postgres alone; external idempotency depends on the provider/runtime.
 - Task-file locking is verified on a local Linux filesystem only (not NFS/SMB).
-- `pnpm test:integration` and `pnpm smoke` need Docker infra and are not run in CI.
+- `pnpm test:coverage`, `pnpm test:integration` and `pnpm smoke` need Docker infra; CI starts it from `infra/compose.yaml` (unverified on GitHub until the next run).
+- Workflow code and process entry points are not counted by coverage; the branch-coverage margin over the 80% floor is under one point.
 - Pre-change workflow histories are not replay-compatible (start new runs).
 
 ## Next milestone

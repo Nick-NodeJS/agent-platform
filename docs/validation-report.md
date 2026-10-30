@@ -35,3 +35,48 @@ After the integration run no `platform_it_*` databases and no test-owned worker/
 - Integration tests and smoke need Docker infra and are not run in GitHub Actions; CI runs install, format, lint, typecheck, unit tests and build. The CI workflow has not been observed running on GitHub for this change.
 - Workflows started before this change are not replay-compatible with the new workflow code (documented: start new runs).
 - No paid LLM calls, cloud resources, OpenHands integration, product repository, or deployment.
+
+## Code-quality change (policy, enforcement, coverage)
+
+Executed on 2026-10-30 after a clean `pnpm install --frozen-lockfile` (node_modules and dist removed first):
+
+| Check                                                            | Result                                                              |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build` | passed (lint is type-aware and now covers tests, scripts, fixtures) |
+| `pnpm test` (unit, no infra)                                     | 74 tests passed                                                     |
+| `pnpm test:coverage` (unit + live integration, 12 files)         | 108 tests passed; thresholds met                                    |
+| `pnpm smoke` (compiled TypeScript script)                        | 15 assertions passed                                                |
+
+Coverage (V8, repository-wide, `coverage/coverage-summary.json`): **lines 87.83%, branches 80.77%**, statements 87.41%,
+functions 88.29% (floor: 80% lines and 80% branches). Baseline before this work, measured honestly on the same scope
+with the refactored CLI untested: 55.55% lines / 49.87% branches.
+
+- Measured scope: `packages/*/src` and `apps/*/src` (unit + in-process integration tests). Files never loaded are in the denominator.
+- Excluded: test files, `*.d.ts`, `dist/`, `**/fixtures/**` (child-process fixture entry points).
+- Not instrumented (behavior is tested but not counted): workflow code (Temporal sandbox bundle; it stays in the denominator
+  at 0% line coverage), `main.ts` entry points of the CLI and worker (thin process glue, also in the denominator), the CLI/worker
+  processes started by `pnpm smoke`, and the child processes of the cross-process `LocalTaskStore` tests.
+- The branch margin is small (0.77 points). Coverage is evidence of execution, not correctness; critical scenarios have explicit tests.
+
+Gaps found and fixed in the baseline: package-level test files were excluded from every tsconfig and were never typechecked;
+the cross-process fixture was an untyped `.mjs` and the smoke test an untyped `.mjs` (both are now TypeScript, compiled and linted);
+many control-flow statements had no braces; production code used non-null assertions, `as` casts and `any`-typed database
+rows (rows are now parsed with Zod); the CLI was a single 400-line module (now `cli.ts` plus one module per command, run
+in-process by tests); the executor contract used unchecked generics (now a typed role map, removing `as O`).
+No inline shell-string programs were found.
+
+Behavior changes (kept separate from cleanup): none intended. Two small deliberate ones: unreachable/unused code was removed
+(`listTaskIds`, `nowIso`, an unreachable approval-version check), and `reuse` no longer silently substitutes zero usage when the
+execution row is missing (it fails loudly).
+
+CI (`.github/workflows/ci.yml`) now runs install, format, lint, typecheck, build, starts Postgres + Temporal from
+`infra/compose.yaml` with dummy values, runs `pnpm test:coverage` (which already includes the unit suite, so it is not run twice) and
+`pnpm smoke`, and uploads only `coverage/lcov.info` and `coverage/coverage-summary.json`. The workflow has not been observed
+running on GitHub for this change.
+
+### Remaining limitations
+
+- CI needs Docker (Compose, the Temporal image) on the runner; it is unverified until it runs on GitHub.
+- Workflow code and entry-point processes are not measured by coverage.
+- Branch coverage is close to the floor; new code needs tests, not threshold changes.
+- The policy is applied by context loading and tooling, not by prompts alone; no real coding agent exists yet to exercise `loadPolicyContext`.

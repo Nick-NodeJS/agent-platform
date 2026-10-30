@@ -1,5 +1,8 @@
 import { z } from 'zod';
 
+export const DEFAULT_AGENT_LEASE_TTL_MS = 120_000;
+const MIN_AGENT_LEASE_TTL_MS = 1000;
+
 const baseSchema = z.object({
   EXECUTION_MODE: z.enum(['mock', 'openhands']).default('mock'),
   TEMPORAL_ADDRESS: z.string().default('127.0.0.1:7233'),
@@ -8,7 +11,11 @@ const baseSchema = z.object({
   TASK_STORE_DIR: z.string().default('.task-data/tasks'),
   LOG_LEVEL: z.string().default('info'),
   APPROVAL_TRUSTED_SIGNERS_FILE: z.string().optional(),
-  AGENT_LEASE_TTL_MS: z.coerce.number().int().min(1000).default(120000),
+  AGENT_LEASE_TTL_MS: z.coerce
+    .number()
+    .int()
+    .min(MIN_AGENT_LEASE_TTL_MS)
+    .default(DEFAULT_AGENT_LEASE_TTL_MS),
 });
 
 export const dbConfigSchema = z.object({ DATABASE_URL: z.string().url() });
@@ -24,7 +31,9 @@ export type PlatformConfig = z.infer<typeof baseSchema> & z.infer<typeof dbConfi
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): PlatformConfig {
   const base = baseSchema.parse(env);
   const db = dbConfigSchema.parse(env);
-  if (base.EXECUTION_MODE === 'openhands') openhandsSchema.parse(env);
+  if (base.EXECUTION_MODE === 'openhands') {
+    openhandsSchema.parse(env);
+  }
   return { ...base, ...db };
 }
 

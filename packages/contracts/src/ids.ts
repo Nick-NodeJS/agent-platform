@@ -7,5 +7,3 @@ export const idSchema = z
   .regex(ID_PATTERN, 'id must be 1-64 chars of [A-Za-z0-9_-] and start alphanumeric');
 
 export const timestampSchema = z.string().datetime();
-
-export const nowIso = (): string => new Date().toISOString();

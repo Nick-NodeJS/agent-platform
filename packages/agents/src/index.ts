@@ -48,12 +48,17 @@ export function assertProfileConfigured(
   profile: ModelProfile,
   env: NodeJS.ProcessEnv = process.env,
 ): void {
-  if (profile.provider === 'unconfigured' || profile.model === PLACEHOLDER_MODEL)
+  if (profile.provider === 'unconfigured' || profile.model === PLACEHOLDER_MODEL) {
     throw new ProfileNotConfiguredError('model profile is an unconfigured placeholder');
-  if (!profile.apiKeyEnvVar || !env[profile.apiKeyEnvVar])
+  }
+  if (!profile.apiKeyEnvVar || !env[profile.apiKeyEnvVar]) {
     throw new ProfileNotConfiguredError(
       `credential env var ${profile.apiKeyEnvVar ?? '(none)'} is not set`,
     );
-  if (profile.budget.maxUsd <= 0)
+  }
+  if (profile.budget.maxUsd <= 0) {
     throw new ProfileNotConfiguredError('profile budget must be greater than zero');
+  }
 }
+
+export * from './policy.js';

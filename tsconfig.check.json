@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": { "composite": false, "noEmit": true, "declaration": false, "rootDir": "." },
+  "include": [
+    "apps/*/src/**/*.ts",
+    "packages/*/src/**/*.ts",
+    "tests/**/*.ts",
+    "scripts/**/*.ts",
+    "vitest*.ts"
+  ]
+}

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { generateKeyPairSync } from 'node:crypto';
 import type { ApprovalPayload, ReviewGate } from './approval.js';
 import { canonicalJson } from './approval.js';
-import { generateSigner, signApproval, verifyApproval } from './node.js';
+import { generateSigner, signApproval, verifyApproval, type TrustedSigner } from './node.js';
 
 const digest = (c: string) => c.repeat(64);
 const gate: ReviewGate = {
@@ -32,7 +32,7 @@ function setup() {
   };
   return { signer, trusted, payload };
 }
-const ctx = (trusted: unknown[], now = T0) => ({ gate, trusted: trusted as never, now });
+const ctx = (trusted: TrustedSigner[], now = T0) => ({ gate, trusted, now });
 
 describe('approval envelope verification', () => {
   it('accepts a correctly signed decision for the current gate', () => {
@@ -115,15 +115,20 @@ describe('approval envelope verification', () => {
 
   it('rejects wrong run, wrong gate, and different artifacts', () => {
     const { signer, trusted, payload } = setup();
+    const [first, second] = gate.artifacts;
+    if (!first || !second) {
+      throw new Error('fixture gate needs two artifacts');
+    }
     for (const patch of [
       { runId: 'run-2' },
       { gateId: 'gate-2' },
-      { artifacts: [{ resultId: 'res-a', digest: digest('c') }, gate.artifacts[1]!] },
-      { artifacts: [gate.artifacts[0]!] },
-    ])
+      { artifacts: [{ resultId: 'res-a', digest: digest('c') }, second] },
+      { artifacts: [first] },
+    ]) {
       expect(() =>
         verifyApproval(signApproval({ ...payload, ...patch }, signer), ctx([trusted])),
       ).toThrow(/different/);
+    }
   });
 
   it('signature is bound to the full canonical content (key order independent)', () => {
@@ -134,5 +139,23 @@ describe('approval envelope verification', () => {
     const { trusted } = generateSigner('k', 'a');
     expect(JSON.stringify(trusted)).not.toContain('PRIVATE');
     expect(generateKeyPairSync('ed25519').publicKey.asymmetricKeyType).toBe('ed25519');
+  });
+
+  it('refuses to sign a payload whose identity differs from the signer file', () => {
+    const { signer, payload } = setup();
+    expect(() => signApproval({ ...payload, actor: 'bob' }, signer)).toThrow(
+      /does not match signer/,
+    );
+    expect(() => signApproval({ ...payload, keyId: 'other-key' }, signer)).toThrow(
+      /does not match signer/,
+    );
+  });
+
+  it('treats an unusable trusted public key as an invalid signature instead of crashing', () => {
+    const { signer, trusted, payload } = setup();
+    const broken: TrustedSigner = { ...trusted, publicKeyPem: 'not a pem' };
+    expect(() => verifyApproval(signApproval(payload, signer), ctx([broken]))).toThrow(
+      /invalid signature/,
+    );
   });
 });

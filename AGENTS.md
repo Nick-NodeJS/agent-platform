@@ -6,6 +6,21 @@ Platform repository: reusable orchestration engine and shared packages (pnpm mon
 Product repositories are created later, only after research, business-owner evaluation, and explicit human approval.
 Milestone 1 = infrastructure, contracts, and an executable **mock** workflow. No paid model calls, cloud resources, or product repos.
 
+## Code quality policy (mandatory)
+
+Read [docs/code-quality.md](docs/code-quality.md) before changing code, and report which checks applied (and their
+results) when you finish. Summary of the rules:
+
+- Strict TypeScript; no `any`, non-null assertions, unsafe casts or lint/compiler suppression comments. Parse unknown
+  external data (JSON, env, CLI, Temporal messages, DB rows, model output) instead of asserting types.
+- Readable code: descriptive names, braces and one statement per line, small cohesive functions, named constants with units,
+  comments that explain decisions only. Tests, scripts and child-process fixtures are maintained code (typechecked, linted).
+- SOLID, KISS and YAGNI as judgment: narrow real boundaries (`TaskStore`, `AgentExecutor`), no speculative layers or patterns.
+- Tests assert behavior (results, state transitions, persisted effects, rejected actions, retries, cleanup), not internals;
+  repository-wide 80% line and 80% branch coverage floor (`pnpm test:coverage`), never met by hiding files or lowering thresholds.
+- Tooling enforces the mechanical rules (Prettier, ESLint, `tsc`, Vitest, CI); the policy text is not a security boundary.
+  Agents spawned by the platform get this policy through `loadPolicyContext` (`@platform/agents`), see the policy doc.
+
 ## Architecture rules
 
 - Temporal owns durable execution, retries, approval waits, recovery. PostgreSQL owns business records and cost accounting.
@@ -23,9 +38,11 @@ Milestone 1 = infrastructure, contracts, and an executable **mock** workflow. No
 
 ```sh
 pnpm install --frozen-lockfile
-pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build
+pnpm format:check && pnpm lint && pnpm typecheck && pnpm build
+pnpm test                # unit tests only (builds first, no infra needed)
 pnpm infra:up && pnpm db:migrate
-pnpm test:integration   # live Temporal + Postgres (temporary database), needs Docker
+pnpm test:coverage      # unit + live integration tests with the 80%/80% coverage floor (needs infra above)
+pnpm test:integration   # only the live Temporal + Postgres suites (temporary database)
 pnpm smoke              # end-to-end CLI flow with a temporary signing key
 ```
 

@@ -1,5 +1,6 @@
-import { mkdir, readFile, rename, writeFile, readdir, unlink } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile, unlink } from 'node:fs/promises';
 import lockfile from 'proper-lockfile';
+import { z } from 'zod';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
@@ -15,11 +16,15 @@ import {
 } from '@platform/contracts';
 import { redactDeep } from './redact.js';
 
-interface TaskFile {
-  task: Task;
-  results: Result[];
-  approvals: Approval[];
-}
+const taskFileSchema = z.object({
+  task: taskSchema,
+  results: z.array(resultSchema),
+  approvals: z.array(approvalSchema),
+});
+type TaskFile = z.infer<typeof taskFileSchema>;
+
+const hasErrorCode = (error: unknown, code: string): boolean =>
+  error instanceof Error && 'code' in error && error.code === code;
 
 export interface LocalTaskStoreOptions {
   rootDir: string;
@@ -78,7 +83,9 @@ export class LocalTaskStore implements TaskStore {
   private filePath(taskId: string, ext = 'json'): string {
     const safe = idSchema.parse(taskId);
     const full = path.resolve(this.root, `${safe}.${ext}`);
-    if (path.dirname(full) !== this.root) throw new Error('task path escapes store root');
+    if (path.dirname(full) !== this.root) {
+      throw new Error('task path escapes store root');
+    }
     return full;
   }
 
@@ -114,16 +121,21 @@ export class LocalTaskStore implements TaskStore {
           },
         });
       } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'ELOCKED') throw e;
-        if (Date.now() + delay > deadline)
+        if (!hasErrorCode(e, 'ELOCKED')) {
+          throw e;
+        }
+        if (Date.now() + delay > deadline) {
           throw new LockTimeoutError(`timed out locking task ${taskId}`);
+        }
         await new Promise((r) => setTimeout(r, delay + Math.random() * delay));
       }
     }
     try {
       await this.hooks.afterLock?.();
       return await fn(() => {
-        if (compromised) throw compromised;
+        if (compromised) {
+          throw compromised;
+        }
       });
     } finally {
       await release().catch(() => undefined);
@@ -132,14 +144,12 @@ export class LocalTaskStore implements TaskStore {
 
   private async read(taskId: string): Promise<TaskFile | undefined> {
     try {
-      const raw = JSON.parse(await readFile(this.filePath(taskId), 'utf8')) as TaskFile;
-      return {
-        task: taskSchema.parse(raw.task),
-        results: raw.results.map((r) => resultSchema.parse(r)),
-        approvals: raw.approvals.map((a) => approvalSchema.parse(a)),
-      };
+      const raw: unknown = JSON.parse(await readFile(this.filePath(taskId), 'utf8'));
+      return taskFileSchema.parse(raw);
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      if (hasErrorCode(e, 'ENOENT')) {
+        return undefined;
+      }
       throw e;
     }
   }
@@ -166,7 +176,7 @@ export class LocalTaskStore implements TaskStore {
       assertHeld();
       await this.atomicWrite(
         this.filePath(file.task.taskId),
-        JSON.stringify(redactDeep(file), null, 2),
+        JSON.stringify(redactTaskFile(file), null, 2),
       );
       await this.hooks.afterJsonWrite?.();
     }
@@ -174,7 +184,7 @@ export class LocalTaskStore implements TaskStore {
       assertHeld();
       await this.atomicWrite(
         this.filePath(file.task.taskId, 'md'),
-        renderMarkdown(redactDeep(file)),
+        renderMarkdown(redactTaskFile(file)),
       );
     }
   }
@@ -182,7 +192,9 @@ export class LocalTaskStore implements TaskStore {
   private mutate(taskId: string, fn: (f: TaskFile) => boolean): Promise<Task> {
     return this.withLock(taskId, async (assertHeld) => {
       const file = await this.read(taskId);
-      if (!file) throw new Error(`task not found: ${taskId}`);
+      if (!file) {
+        throw new Error(`task not found: ${taskId}`);
+      }
       const changed = fn(file);
       // Always re-project: a retry after a crash between the JSON and Markdown writes repairs the Markdown.
       await this.writeLocked(file, assertHeld, changed);
@@ -207,7 +219,9 @@ export class LocalTaskStore implements TaskStore {
   async rebuildProjection(taskId: string): Promise<boolean> {
     return this.withLock(taskId, async (assertHeld) => {
       const file = await this.read(taskId);
-      if (!file) return false;
+      if (!file) {
+        return false;
+      }
       await this.writeLocked(file, assertHeld, false);
       return true;
     });
@@ -220,8 +234,12 @@ export class LocalTaskStore implements TaskStore {
   async changeStatus(taskId: string, status: Status): Promise<Task> {
     return await this.mutate(taskId, (f) => {
       const current = f.task.status;
-      if (current === status || isTerminal(current)) return false;
-      if (STATUS_RANK[status] <= STATUS_RANK[current]) return false;
+      if (current === status || isTerminal(current)) {
+        return false;
+      }
+      if (STATUS_RANK[status] <= STATUS_RANK[current]) {
+        return false;
+      }
       f.task.status = status;
       f.task.updatedAt = new Date().toISOString();
       return true;
@@ -231,7 +249,9 @@ export class LocalTaskStore implements TaskStore {
   async attachResult(taskId: string, input: Result): Promise<Task> {
     const result = resultSchema.parse(input);
     return await this.mutate(taskId, (f) => {
-      if (f.results.some((r) => r.resultId === result.resultId)) return false;
+      if (f.results.some((r) => r.resultId === result.resultId)) {
+        return false;
+      }
       f.results.push(result);
       f.task.resultIds.push(result.resultId);
       f.task.updatedAt = new Date().toISOString();
@@ -242,7 +262,9 @@ export class LocalTaskStore implements TaskStore {
   async recordApproval(taskId: string, input: Approval): Promise<Task> {
     const approval = approvalSchema.parse(input);
     return await this.mutate(taskId, (f) => {
-      if (f.approvals.some((a) => a.approvalId === approval.approvalId)) return false;
+      if (f.approvals.some((a) => a.approvalId === approval.approvalId)) {
+        return false;
+      }
       f.approvals.push(approval);
       f.task.approvalIds.push(approval.approvalId);
       f.task.updatedAt = new Date().toISOString();
@@ -257,17 +279,9 @@ export class LocalTaskStore implements TaskStore {
   async getApprovals(taskId: string): Promise<Approval[]> {
     return (await this.read(taskId))?.approvals ?? [];
   }
-
-  async listTaskIds(): Promise<string[]> {
-    try {
-      return (await readdir(this.root))
-        .filter((n) => n.endsWith('.json'))
-        .map((n) => n.slice(0, -5));
-    } catch {
-      return [];
-    }
-  }
 }
+
+const redactTaskFile = (file: TaskFile): TaskFile => taskFileSchema.parse(redactDeep(file));
 
 function renderMarkdown({ task, results, approvals }: TaskFile): string {
   const lines = [

@@ -1,5 +1,6 @@
 import { ApplicationFailure } from '@temporalio/activity';
 import {
+  DEFAULT_AGENT_LEASE_TTL_MS,
   approvalEnvelopeSchema,
   businessEvaluationSchema,
   researchProposalSchema,
@@ -7,8 +8,6 @@ import {
   type AgentExecutor,
   type ApprovalEnvelope,
   type ArtifactRef,
-  type BusinessEvaluation,
-  type ResearchProposal,
   type ResourceConstraints,
   type ReviewGate,
   type Status,
@@ -22,7 +21,6 @@ import {
   verifyApproval,
 } from '@platform/contracts/node';
 import type { RunRepository } from '@platform/persistence';
-import type { BusinessOwnerInput, ResearcherInput } from '@platform/integrations';
 import { runAgentStage } from './agent-stage.js';
 
 export interface ActivityDeps {
@@ -50,7 +48,7 @@ export function createActivities(deps: ActivityDeps) {
     repo,
     tasks,
     executor,
-    leaseTtlMs: deps.leaseTtlMs ?? 120_000,
+    leaseTtlMs: deps.leaseTtlMs ?? DEFAULT_AGENT_LEASE_TTL_MS,
     ...(deps.persistAttempts !== undefined && { persistAttempts: deps.persistAttempts }),
     now,
   };
@@ -68,12 +66,67 @@ export function createActivities(deps: ActivityDeps) {
     const refs: ArtifactRef[] = [];
     for (const id of [researchResultId(runId), evaluationResultId(runId)]) {
       const r = await repo.getResult(id);
-      if (!r)
+      if (!r) {
         throw ApplicationFailure.nonRetryable(`result ${id} is not saved yet`, 'GateNotReady');
+      }
       refs.push({ resultId: id, digest: r.digest ?? digestPayload(r.payload) });
     }
     return refs;
   };
+
+  /**
+   * Verifies a signed decision against the CURRENT canonical artifacts. Identity comes from the trusted-signers
+   * file, never from the caller. `alreadyConsumedOk` is for the re-check inside recordDecision, after the decision id
+   * was legitimately consumed by this very run.
+   */
+  async function verifyAgainstCurrent(
+    rawEnvelope: unknown,
+    gate: ReviewGate,
+    at: Date,
+    alreadyConsumedOk = false,
+  ) {
+    const reject = (m: string): never => {
+      throw ApplicationFailure.nonRetryable(m, 'ApprovalRejected');
+    };
+    if (!deps.trustedSignersFile) {
+      return reject('approval verification is not configured (APPROVAL_TRUSTED_SIGNERS_FILE)');
+    }
+    const parsed = approvalEnvelopeSchema.safeParse(rawEnvelope);
+    if (!parsed.success) {
+      return reject('malformed approval envelope');
+    }
+
+    const current = await currentArtifacts(gate.runId);
+    if (!sameArtifacts(current, gate.artifacts)) {
+      return reject('gate artifacts are no longer current');
+    }
+
+    let trusted;
+    try {
+      trusted = loadTrustedSigners(deps.trustedSignersFile);
+    } catch {
+      return reject('trusted signers file is unreadable or invalid');
+    }
+    let verified;
+    try {
+      verified = verifyApproval(parsed.data, { gate, trusted, now: at });
+    } catch (e) {
+      if (e instanceof ApprovalRejectedError) {
+        return reject(e.message);
+      }
+      throw e;
+    }
+    const consumed = await repo.hasDecisionId(parsed.data.payload.decisionId);
+    if (consumed && !alreadyConsumedOk) {
+      return reject('decision id was already used (replay)');
+    }
+    return {
+      actor: verified.actor,
+      keyId: verified.keyId,
+      envelopeDigest: verified.envelopeDigest,
+      verifiedAt: at.toISOString(),
+    };
+  }
 
   return {
     async createTaskAndRun(args: {
@@ -121,16 +174,15 @@ export function createActivities(deps: ActivityDeps) {
       goal: string;
       constraints: ResourceConstraints;
     }): Promise<{ resultId: string; title: string; reused: boolean }> {
-      const input: ResearcherInput = { goal: args.goal, constraints: args.constraints };
-      const res = await runAgentStage<ResearcherInput, ResearchProposal>(stageDeps, {
+      const res = await runAgentStage(stageDeps, {
         runId: args.runId,
         taskId: args.taskId,
         role: 'researcher',
         stage: RESEARCH_STAGE,
         kind: 'research-proposal',
         resultId: researchResultId(args.runId),
-        input,
-        validateOutput: (o) => researchProposalSchema.parse(o),
+        input: { goal: args.goal, constraints: args.constraints },
+        validateOutput: (output) => researchProposalSchema.parse(output),
       });
       return { resultId: res.resultId, title: res.output.title, reused: res.reused };
     },
@@ -141,21 +193,21 @@ export function createActivities(deps: ActivityDeps) {
       constraints: ResourceConstraints;
     }): Promise<{ resultId: string; recommendation: string; reused: boolean }> {
       const stored = await repo.getResult(researchResultId(args.runId));
-      if (!stored)
+      if (!stored) {
         throw ApplicationFailure.nonRetryable('research proposal result not found', 'MissingInput');
-      const input: BusinessOwnerInput = {
-        proposal: researchProposalSchema.parse(stored.payload),
-        constraints: args.constraints,
-      };
-      const res = await runAgentStage<BusinessOwnerInput, BusinessEvaluation>(stageDeps, {
+      }
+      const res = await runAgentStage(stageDeps, {
         runId: args.runId,
         taskId: args.taskId,
         role: 'business-owner',
         stage: EVALUATION_STAGE,
         kind: 'business-evaluation',
         resultId: evaluationResultId(args.runId),
-        input,
-        validateOutput: (o) => businessEvaluationSchema.parse(o),
+        input: {
+          proposal: researchProposalSchema.parse(stored.payload),
+          constraints: args.constraints,
+        },
+        validateOutput: (output) => businessEvaluationSchema.parse(output),
       });
       return {
         resultId: res.resultId,
@@ -172,7 +224,9 @@ export function createActivities(deps: ActivityDeps) {
       const artifacts = await currentArtifacts(args.runId);
       for (const id of artifacts.map((a) => a.resultId)) {
         const r = await repo.getResult(id);
-        if (r) await tasks.attachResult(args.taskId, r);
+        if (r) {
+          await tasks.attachResult(args.taskId, r);
+        }
       }
       await repo.updateStatus(args.runId, 'WAITING_FOR_HUMAN_APPROVAL');
       await tasks.changeStatus(args.taskId, 'WAITING_FOR_HUMAN_APPROVAL');
@@ -236,47 +290,6 @@ export function createActivities(deps: ActivityDeps) {
       return { stored };
     },
   };
-
-  async function verifyAgainstCurrent(
-    rawEnvelope: unknown,
-    gate: ReviewGate,
-    at: Date,
-    alreadyConsumedOk = false,
-  ) {
-    const reject = (m: string): never => {
-      throw ApplicationFailure.nonRetryable(m, 'ApprovalRejected');
-    };
-    if (!deps.trustedSignersFile)
-      return reject('approval verification is not configured (APPROVAL_TRUSTED_SIGNERS_FILE)');
-    const parsed = approvalEnvelopeSchema.safeParse(rawEnvelope);
-    if (!parsed.success) return reject('malformed approval envelope');
-
-    const current = await currentArtifacts(gate.runId);
-    if (!sameArtifacts(current, gate.artifacts))
-      return reject('gate artifacts are no longer current');
-
-    let trusted;
-    try {
-      trusted = loadTrustedSigners(deps.trustedSignersFile);
-    } catch {
-      return reject('trusted signers file is unreadable or invalid');
-    }
-    let verified;
-    try {
-      verified = verifyApproval(parsed.data, { gate, trusted, now: at });
-    } catch (e) {
-      if (e instanceof ApprovalRejectedError) return reject(e.message);
-      throw e;
-    }
-    const consumed = await repo.hasDecisionId(parsed.data.payload.decisionId);
-    if (consumed && !alreadyConsumedOk) return reject('decision id was already used (replay)');
-    return {
-      actor: verified.actor,
-      keyId: verified.keyId,
-      envelopeDigest: verified.envelopeDigest,
-      verifiedAt: at.toISOString(),
-    };
-  }
 }
 
 export type Activities = ReturnType<typeof createActivities>;

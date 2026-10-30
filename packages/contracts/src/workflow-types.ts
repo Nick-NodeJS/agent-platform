@@ -1,5 +1,7 @@
-import type { ReviewGate } from './approval.js';
-import type { ResourceConstraints, Status } from './records.js';
+import { z } from 'zod';
+import { reviewGateSchema } from './approval.js';
+import { idSchema, timestampSchema } from './ids.js';
+import { statusSchema, type ResourceConstraints } from './records.js';
 
 export interface ResearchProposalInput {
   runId: string;
@@ -7,24 +9,27 @@ export interface ResearchProposalInput {
   constraints: ResourceConstraints;
 }
 
-export interface StageEntry {
-  stage: Status;
-  at: string;
-}
-
-export interface WorkflowStatus {
-  runId: string;
-  status: Status;
-  taskId?: string;
-  stages: StageEntry[];
-  resultIds: string[];
-  gate?: ReviewGate;
-  decision?: {
-    decision: 'approve' | 'reject';
-    source: 'human';
-    actor: string;
-    keyId: string;
-    decisionId: string;
-    reason?: string;
-  };
-}
+/** Query result of the workflow. Parsed by clients because Temporal returns untyped JSON. */
+export const workflowStatusSchema = z
+  .object({
+    runId: idSchema,
+    status: statusSchema,
+    taskId: idSchema.optional(),
+    stages: z.array(z.object({ stage: statusSchema, at: timestampSchema }).strict()),
+    resultIds: z.array(idSchema),
+    gate: reviewGateSchema.optional(),
+    decision: z
+      .object({
+        decision: z.enum(['approve', 'reject']),
+        source: z.literal('human'),
+        actor: z.string(),
+        keyId: idSchema,
+        decisionId: idSchema,
+        reason: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type WorkflowStatus = z.infer<typeof workflowStatusSchema>;
+export type StageEntry = WorkflowStatus['stages'][number];

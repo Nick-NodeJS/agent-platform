@@ -6,26 +6,28 @@ import { loadConfig } from '@platform/contracts';
 import { createExecutor, LocalTaskStore } from '@platform/integrations';
 import { createPool, RunRepository } from '@platform/persistence';
 import { createActivities } from './activities.js';
+import { assertNoPrivateSigningKey } from './worker-env.js';
 
-if (existsSync('.env')) process.loadEnvFile('.env');
-if (process.env['APPROVAL_SIGNER_FILE'])
-  throw new Error(
-    'APPROVAL_SIGNER_FILE (private signing key) must not be set in the worker environment; it belongs only to the trusted human CLI',
-  );
+if (existsSync('.env')) {
+  process.loadEnvFile('.env');
+}
+assertNoPrivateSigningKey(process.env);
 const config = loadConfig();
-if (!config.APPROVAL_TRUSTED_SIGNERS_FILE)
-  console.warn(
-    'APPROVAL_TRUSTED_SIGNERS_FILE is not set: runs will pause at review but no decision can be verified (run "pnpm cli approval-keygen").',
-  );
 const log = pino({
   level: config.LOG_LEVEL,
   redact: ['*.apiKey', '*.password', '*.DATABASE_URL', 'DATABASE_URL'],
 });
 
-if (config.EXECUTION_MODE !== 'mock')
+if (!config.APPROVAL_TRUSTED_SIGNERS_FILE) {
+  log.warn(
+    'APPROVAL_TRUSTED_SIGNERS_FILE is not set: runs will pause at review but no decision can be verified (run "pnpm cli approval-keygen").',
+  );
+}
+if (config.EXECUTION_MODE !== 'mock') {
   log.warn(
     'EXECUTION_MODE is not "mock": real execution is not implemented; agent activities will fail.',
   );
+}
 
 const db = createPool(config.DATABASE_URL);
 const activities = createActivities({

@@ -1,11 +1,12 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { writeFileSync } from 'node:fs';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { existsSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
-import { Client, Connection } from '@temporalio/client';
+import { z } from 'zod';
+import { Client, Connection, WorkflowUpdateFailedError } from '@temporalio/client';
 import {
   NativeConnection,
   Worker,
@@ -16,11 +17,17 @@ import {
   WORKFLOW_NAME,
   STATUS_QUERY,
   DECISION_UPDATE,
+  approvalSchema,
+  decisionAckSchema,
+  resultSchema,
+  taskSchema,
+  workflowStatusSchema,
   type AgentExecutor,
+  type AgentRoleIO,
   type AgentRunRequest,
   type AgentRunResponse,
+  type ExecutableRole,
   type ApprovalPayload,
-  type DecisionAck,
   type WorkflowStatus,
   type ResourceConstraints,
 } from '@platform/contracts';
@@ -31,40 +38,54 @@ import {
   type TrustedSigner,
 } from '@platform/contracts/node';
 import { LocalTaskStore, MockAgentExecutor } from '@platform/integrations';
+import type { CliContext } from '../../apps/cli/src/context.js';
 import { createPool, migrate, RunRepository, type Db } from '@platform/persistence';
-import { createActivities, type ActivityDeps } from '../../apps/worker/src/activities.js';
+import {
+  createActivities,
+  type Activities,
+  type ActivityDeps,
+} from '../../apps/worker/src/activities.js';
 
-if (process.env['DATABASE_URL'] === undefined) {
-  try {
-    process.loadEnvFile('.env');
-  } catch {
-    /* no .env */
-  }
+if (process.env['DATABASE_URL'] === undefined && existsSync('.env')) {
+  process.loadEnvFile('.env');
 }
 
 const workflowsPath = fileURLToPath(
   new URL('../../apps/worker/dist/workflows/index.js', import.meta.url),
 );
 
-/** Counts real executor invocations, optionally slowed/blocked, around the deterministic mock. */
+/** Counts real executor invocations around the deterministic mock; can be slowed, blocked or made to fail. */
 export class CountingExecutor implements AgentExecutor {
-  readonly calls: AgentRunRequest<unknown>[] = [];
+  readonly calls: AgentRunRequest[] = [];
+  /** Holds every call until it resolves (models a slow external run). */
   gate: Promise<void> | undefined;
   delayMs = 0;
+  /** When set, calls are counted and then fail with this error. */
+  failure: Error | undefined;
   private readonly inner = new MockAgentExecutor();
-  async run<I, O>(request: AgentRunRequest<I>): Promise<AgentRunResponse<O>> {
-    this.calls.push(request as AgentRunRequest<unknown>);
-    if (this.gate) await this.gate;
-    if (this.delayMs) await new Promise((r) => setTimeout(r, this.delayMs));
-    return this.inner.run<I, O>(request);
+
+  async run<R extends ExecutableRole>(
+    request: AgentRunRequest<R>,
+  ): Promise<AgentRunResponse<AgentRoleIO[R]['output']>> {
+    this.calls.push(request);
+    await this.gate;
+    if (this.delayMs > 0) {
+      await sleep(this.delayMs);
+    }
+    if (this.failure) {
+      throw this.failure;
+    }
+    return this.inner.run(request);
   }
-  count(role?: string) {
-    return this.calls.filter((c) => !role || c.role === role).length;
+
+  count(role?: ExecutableRole): number {
+    return this.calls.filter((call) => !role || call.role === role).length;
   }
 }
 
 export interface Env {
   adminUrl: string;
+  databaseUrl: string;
   dbName: string;
   db: Db;
   repo: RunRepository;
@@ -83,8 +104,9 @@ export interface Env {
 
 export async function createEnv(): Promise<Env> {
   const base = process.env['DATABASE_URL'];
-  if (!base)
+  if (!base) {
     throw new Error('DATABASE_URL is required (copy .env.example to .env and run pnpm infra:up)');
+  }
   const url = new URL(base);
   const dbName = `platform_it_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
   const adminUrl = new URL(base);
@@ -111,6 +133,7 @@ export async function createEnv(): Promise<Env> {
 
   return {
     adminUrl: adminUrl.toString(),
+    databaseUrl: url.toString(),
     dbName,
     db,
     repo: new RunRepository(db),
@@ -144,7 +167,7 @@ export interface RunningWorker {
 export async function startWorker(
   env: Env,
   overrides: Partial<ActivityDeps> = {},
-  wrap?: (acts: ReturnType<typeof createActivities>) => Record<string, (...a: never[]) => unknown>,
+  wrap?: (activities: Activities) => Activities,
 ): Promise<RunningWorker> {
   const connection = await NativeConnection.connect({
     address: process.env['TEMPORAL_ADDRESS'] ?? '127.0.0.1:7233',
@@ -174,6 +197,8 @@ export async function startWorker(
   };
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export const constraints: ResourceConstraints = {
   budgetUsd: 'unknown',
   teamSize: 'unknown',
@@ -192,76 +217,179 @@ export async function startRun(env: Env, runId = newRunId()) {
   return runId;
 }
 
-export const query = (env: Env, runId: string) =>
-  env.client.workflow.getHandle(runId).query<WorkflowStatus>(STATUS_QUERY);
+const POLL_INTERVAL_MS = 150;
+const DEFAULT_WAIT_MS = 30_000;
+const APPROVAL_VALIDITY_MS = 5 * 60_000;
+const BACKDATE_MS = 1000;
 
+export async function query(env: Env, runId: string): Promise<WorkflowStatus> {
+  const raw = await env.client.workflow.getHandle(runId).query(STATUS_QUERY);
+  return workflowStatusSchema.parse(raw);
+}
+
+/** Bounded polling: a worker that is still starting makes the query fail, which is retried until the deadline. */
 export async function waitForStatus(
   env: Env,
   runId: string,
-  pred: (s: WorkflowStatus) => boolean,
-  ms = 30000,
-) {
-  const end = Date.now() + ms;
+  predicate: (status: WorkflowStatus) => boolean,
+  timeoutMs = DEFAULT_WAIT_MS,
+): Promise<WorkflowStatus> {
+  const deadline = Date.now() + timeoutMs;
   let last: WorkflowStatus | undefined;
-  while (Date.now() < end) {
+  let lastError: unknown;
+  while (Date.now() < deadline) {
     try {
       last = await query(env, runId);
-      if (pred(last)) return last;
-    } catch {
-      /* worker not up yet */
+      if (predicate(last)) {
+        return last;
+      }
+    } catch (error) {
+      lastError = error;
     }
-    await new Promise((r) => setTimeout(r, 150));
+    await sleep(POLL_INTERVAL_MS);
   }
-  throw new Error(`timeout waiting on ${runId}; last=${JSON.stringify(last)}`);
+  throw new Error(
+    `timeout waiting on ${runId}; last status=${JSON.stringify(last)}; last query error=${String(lastError)}`,
+  );
 }
 
-export const waitForGate = (env: Env, runId: string) => waitForStatus(env, runId, (s) => !!s.gate);
+/** Bounded wait for a condition that is not exposed through the workflow status (e.g. an executor was called). */
+export async function waitUntil(
+  condition: () => boolean,
+  description: string,
+  timeoutMs = DEFAULT_WAIT_MS,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      throw new Error(`timeout waiting until ${description}`);
+    }
+    await sleep(POLL_INTERVAL_MS);
+  }
+}
 
+export const waitForGate = (env: Env, runId: string) =>
+  waitForStatus(env, runId, (status) => status.gate !== undefined);
+
+/** Builds a signed decision for the gate shown in `status`; `patch` overrides signed fields to craft bad inputs. */
 export function sign(
   env: Env,
-  wf: WorkflowStatus,
+  status: WorkflowStatus,
   patch: Partial<ApprovalPayload> = {},
   signer: SignerFile = env.signer,
 ) {
-  const issued = Date.now();
+  if (!status.gate) {
+    throw new Error('cannot sign: the run has no open review gate');
+  }
+  const issuedAt = Date.now();
   const payload: ApprovalPayload = {
     version: 1,
     decisionId: `dec-${randomUUID().slice(0, 12)}`,
-    runId: wf.runId,
-    gateId: wf.gate!.gateId,
-    artifacts: wf.gate!.artifacts,
+    runId: status.runId,
+    gateId: status.gate.gateId,
+    artifacts: status.gate.artifacts,
     decision: 'approve',
     keyId: signer.keyId,
     actor: signer.actor,
-    issuedAt: new Date(issued - 1000).toISOString(),
-    expiresAt: new Date(issued + 5 * 60_000).toISOString(),
+    issuedAt: new Date(issuedAt - BACKDATE_MS).toISOString(),
+    expiresAt: new Date(issuedAt + APPROVAL_VALIDITY_MS).toISOString(),
     ...patch,
   };
   return signApproval(payload, signer);
 }
 
-export const submit = (env: Env, runId: string, envelope: unknown) =>
-  env.client.workflow.getHandle(runId).executeUpdate<DecisionAck, [unknown]>(DECISION_UPDATE, {
-    args: [envelope],
-  });
-
-export async function expectRejected(promise: Promise<unknown>, pattern: RegExp) {
-  let error: unknown;
-  try {
-    await promise;
-  } catch (e) {
-    error = e;
-  }
-  if (!error) throw new Error('expected the decision to be rejected, but it was accepted');
-  const msg = String(
-    (error as { cause?: { message?: string } }).cause?.message ?? (error as Error).message,
-  );
-  if (!pattern.test(msg)) throw new Error(`rejected with unexpected message: ${msg}`);
+export async function submit(env: Env, runId: string, envelope: unknown) {
+  const raw = await env.client.workflow
+    .getHandle(runId)
+    .executeUpdate(DECISION_UPDATE, { args: [envelope] });
+  return decisionAckSchema.parse(raw);
 }
 
-export async function terminateQuietly(env: Env, runId: string) {
+export function failureMessage(error: unknown): string {
+  if (error instanceof WorkflowUpdateFailedError) {
+    return error.cause?.message ?? error.message;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Asserts that a decision was refused with a reason matching `pattern`. */
+export async function expectRejected(promise: Promise<unknown>, pattern: RegExp): Promise<void> {
+  const outcome = await promise.then(
+    () => undefined,
+    (error: unknown) => ({ error }),
+  );
+  if (!outcome) {
+    throw new Error('expected the decision to be rejected, but it was accepted');
+  }
+  const message = failureMessage(outcome.error);
+  if (!pattern.test(message)) {
+    throw new Error(`rejected with unexpected message: ${message}`);
+  }
+}
+
+export async function terminateQuietly(env: Env, runId: string): Promise<void> {
   await env.client.workflow
     .getHandle(runId)
     .terminate('integration test cleanup')
-    .catch(() => undefined);
+    .catch((error: unknown) => {
+      // Already-completed workflows cannot be terminated; that is the normal case for finished runs.
+      if (!/not found|already completed/i.test(failureMessage(error))) {
+        throw error;
+      }
+    });
+}
+
+const taskFileSchema = z.object({
+  task: taskSchema,
+  results: z.array(resultSchema),
+  approvals: z.array(approvalSchema),
+});
+
+/** Reads the canonical JSON task file written by the LocalTaskStore for `runId`. */
+export async function readTaskFile(env: Env, runId: string) {
+  const raw = await readFile(path.join(env.tasksDir, `task-${runId}.json`), 'utf8');
+  return taskFileSchema.parse(JSON.parse(raw));
+}
+
+const approvalRowSchema = z.object({
+  decision: z.string(),
+  source: z.string(),
+  actor: z.string(),
+  key_id: z.string(),
+});
+
+/** Persisted approval rows of a run, as the Postgres source of truth sees them. */
+export async function approvalRows(env: Env, runId: string) {
+  const found = await env.db.query(
+    'SELECT decision, source, actor, key_id FROM approvals WHERE run_id=$1',
+    [runId],
+  );
+  return found.rows.map((row) => approvalRowSchema.parse(row));
+}
+
+const resultIdRowSchema = z.object({ result_id: z.string() });
+
+export async function resultIds(env: Env, runId: string): Promise<string[]> {
+  const found = await env.db.query('SELECT result_id FROM results WHERE run_id=$1', [runId]);
+  return found.rows.map((row) => resultIdRowSchema.parse(row).result_id);
+}
+
+/** A CLI context bound to the temporary test infrastructure, capturing everything the CLI prints. */
+export function cliContext(env: Env, overrides: NodeJS.ProcessEnv = {}) {
+  const out: string[] = [];
+  const err: string[] = [];
+  const ctx: CliContext = {
+    env: {
+      DATABASE_URL: env.databaseUrl,
+      TEMPORAL_ADDRESS: process.env['TEMPORAL_ADDRESS'] ?? '127.0.0.1:7233',
+      TASK_QUEUE: env.taskQueue,
+      TASK_STORE_DIR: env.tasksDir,
+      ...overrides,
+    },
+    cwd: process.cwd(),
+    homeDir: env.keyDir,
+    out: (line) => out.push(line),
+    err: (line) => err.push(line),
+  };
+  return { ctx, out, err };
 }

@@ -1,13 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { generateSigner } from '@platform/contracts/node';
 import {
   CountingExecutor,
   createEnv,
+  approvalRows,
   expectRejected,
-  newRunId,
   query,
+  readTaskFile,
+  resultIds,
   sign,
   startRun,
   startWorker,
@@ -19,142 +20,165 @@ import {
   type RunningWorker,
 } from './harness.js';
 
+const WAITING = 'WAITING_FOR_HUMAN_APPROVAL';
+const NOT_BUFFERED_OBSERVATION_MS = 1500;
+const MINUTE_MS = 60_000;
+const WORKER_DOWN_MS = 1500;
+const DIGEST_A = 'a'.repeat(64);
+const DIGEST_E = 'e'.repeat(64);
+const DIGEST_F = 'f'.repeat(64);
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 describe('review gate and signed human approval (live Temporal + Postgres)', () => {
   let env: Env;
   let worker: RunningWorker;
-  const runs: string[] = [];
-  const track = (id: string) => (runs.push(id), id);
+  const startedRuns: string[] = [];
+
+  const startTrackedRun = async () => {
+    const runId = await startRun(env);
+    startedRuns.push(runId);
+    return runId;
+  };
+
+  const finish = (runId: string) => env.client.workflow.getHandle(runId).result();
 
   beforeAll(async () => {
     env = await createEnv();
     worker = await startWorker(env);
   });
+
   afterAll(async () => {
-    for (const r of runs) await terminateQuietly(env, r);
+    for (const runId of startedRuns) {
+      await terminateQuietly(env, runId);
+    }
     await worker?.stop();
     await env?.cleanup();
   });
 
   it('rejects early decisions, never buffers them, and opens the gate only after persistence', async () => {
     await worker.stop();
-    const exec = new CountingExecutor();
-    let release!: () => void;
-    exec.gate = new Promise((r) => (release = r));
-    worker = await startWorker(env, { executor: exec });
+    const executor = new CountingExecutor();
+    let releaseResearch = () => {};
+    executor.gate = new Promise<void>((resolve) => {
+      releaseResearch = resolve;
+    });
+    worker = await startWorker(env, { executor });
 
-    const runId = track(await startRun(env));
-    const early = await waitForStatus(env, runId, (s) => s.status === 'RESEARCHING');
+    const runId = await startTrackedRun();
+    const early = await waitForStatus(env, runId, (status) => status.status === 'RESEARCHING');
     expect(early.gate).toBeUndefined();
 
-    // A validly signed decision for an invented gate/artifacts, submitted before the gate exists.
-    const fakeWf = {
-      ...early,
-      gate: {
-        gateId: 'gate-not-yet',
-        runId,
-        artifacts: [{ resultId: 'x', digest: 'a'.repeat(64) }],
-      },
+    // A well-formed, correctly signed decision for an invented gate, submitted before the gate exists.
+    const inventedGate = {
+      gateId: 'gate-not-yet',
+      runId,
+      artifacts: [{ resultId: 'not-yet-saved', digest: DIGEST_A }],
     };
-    await expectRejected(submit(env, runId, sign(env, fakeWf)), /not open yet/);
-
-    release();
-    const wf = await waitForGate(env, runId);
-    // Invariant: when the gate is visible, everything it refers to is already persisted and projected.
-    const row = (await env.db.query('SELECT status FROM runs WHERE run_id=$1', [runId])).rows[0];
-    const results = (await env.db.query('SELECT result_id FROM results WHERE run_id=$1', [runId]))
-      .rows;
-    const taskFile = JSON.parse(
-      readFileSync(path.join(env.tasksDir, `task-${runId}.json`), 'utf8'),
+    await expectRejected(
+      submit(env, runId, sign(env, { ...early, gate: inventedGate })),
+      /not open yet/,
     );
-    expect(row.status).toBe('WAITING_FOR_HUMAN_APPROVAL');
-    expect(results).toHaveLength(2);
-    expect(taskFile.task.status).toBe('WAITING_FOR_HUMAN_APPROVAL');
+
+    releaseResearch();
+    const status = await waitForGate(env, runId);
+
+    // Invariant: once the gate is visible, everything it refers to is already persisted and projected.
+    const run = await env.db.query('SELECT status FROM runs WHERE run_id=$1', [runId]);
+    const savedResultIds = await resultIds(env, runId);
+    const taskFile = await readTaskFile(env, runId);
+    expect(run.rows).toEqual([{ status: WAITING }]);
+    expect(savedResultIds).toHaveLength(2);
+    expect(taskFile.task.status).toBe(WAITING);
     expect(taskFile.results).toHaveLength(2);
-    expect(wf.gate!.artifacts.map((a) => a.resultId).sort()).toEqual(
-      results.map((r) => r.result_id).sort(),
+    expect(status.gate?.artifacts.map((artifact) => artifact.resultId).sort()).toEqual(
+      savedResultIds.sort(),
     );
 
-    // The early decision was not buffered: the run is still waiting.
-    await new Promise((r) => setTimeout(r, 1500));
-    expect((await query(env, runId)).status).toBe('WAITING_FOR_HUMAN_APPROVAL');
+    // The early decision was not buffered: the run keeps waiting until a fresh decision arrives.
+    await sleep(NOT_BUFFERED_OBSERVATION_MS);
+    expect((await query(env, runId)).status).toBe(WAITING);
 
-    // A fresh decision now works.
-    const ack = await submit(env, runId, sign(env, wf));
+    const ack = await submit(env, runId, sign(env, status));
     expect(ack.accepted).toBe(true);
-    await env.client.workflow.getHandle(runId).result();
+    await finish(runId);
     expect((await query(env, runId)).status).toBe('APPROVED');
+
     await worker.stop();
     worker = await startWorker(env);
   });
 
   it('malformed, forged, unsigned, tampered, wrong-signer, expired, stale, wrong-run and replayed decisions do nothing', async () => {
-    const runA = track(await startRun(env));
-    const runB = track(await startRun(env));
-    const a = await waitForGate(env, runA);
-    const b = await waitForGate(env, runB);
+    const runA = await startTrackedRun();
+    const runB = await startTrackedRun();
+    const statusA = await waitForGate(env, runA);
+    const statusB = await waitForGate(env, runB);
+    const gateB = statusB.gate;
+    const firstArtifact = statusA.gate?.artifacts[0];
+    const secondArtifact = statusA.gate?.artifacts[1];
+    if (!gateB || !firstArtifact || !secondArtifact) {
+      throw new Error('both runs must have a gate with two artifacts');
+    }
 
-    const stranger = generateSigner('it-key', 'it-human').signer; // same ids, untrusted key
-    const attempts: [string, unknown, RegExp][] = [
+    const untrustedKey = generateSigner('it-key', 'it-human').signer; // same ids, key not in the trusted file
+    const tampered = (() => {
+      const envelope = sign(env, statusA, { decision: 'reject' });
+      return { ...envelope, payload: { ...envelope.payload, decision: 'approve' } };
+    })();
+    const now = Date.now();
+
+    const badDecisions: [string, unknown, RegExp][] = [
       ['garbage', 'approve', /malformed/],
       ['empty object', {}, /malformed/],
       [
-        'forged unsigned source:human',
+        'forged unsigned "source: human"',
         { source: 'human', actor: 'x', decision: 'approve', decisionId: 'd1' },
         /malformed/,
       ],
-      ['payload without signature', { payload: sign(env, a).payload }, /malformed/],
-      ['bad signature', { ...sign(env, a), signature: 'AAAA' }, /signature/],
-      ['wrong signer key', sign(env, a, {}, stranger), /signature/],
+      ['payload without signature', { payload: sign(env, statusA).payload }, /malformed/],
+      ['bad signature', { ...sign(env, statusA), signature: 'AAAA' }, /signature/],
+      ['untrusted key with trusted ids', sign(env, statusA, {}, untrustedKey), /signature/],
       [
         'unknown key id',
-        sign(env, a, { keyId: 'nope' }, { ...env.signer, keyId: 'nope' }),
+        sign(env, statusA, { keyId: 'nope' }, { ...env.signer, keyId: 'nope' }),
         /unknown signer/,
       ],
       [
-        'claimed actor differs from trusted config',
-        sign(env, a, { actor: 'root' }, { ...env.signer, actor: 'root' }),
+        'actor that differs from the trusted signer config',
+        sign(env, statusA, { actor: 'root' }, { ...env.signer, actor: 'root' }),
         /actor/,
       ],
-      [
-        'altered signed content',
-        (() => {
-          const e = sign(env, a, { decision: 'reject' });
-          return { ...e, payload: { ...e.payload, decision: 'approve' } };
-        })(),
-        /signature/,
-      ],
+      ['altered signed content', tampered, /signature/],
       [
         'expired',
-        sign(env, a, {
-          issuedAt: new Date(Date.now() - 12 * 60_000).toISOString(),
-          expiresAt: new Date(Date.now() - 6 * 60_000).toISOString(),
+        sign(env, statusA, {
+          issuedAt: new Date(now - 12 * MINUTE_MS).toISOString(),
+          expiresAt: new Date(now - 6 * MINUTE_MS).toISOString(),
         }),
         /expired/,
       ],
-      ['wrong gate', sign(env, a, { gateId: b.gate!.gateId }), /stale\) gate|different/],
-      ['other run (signed for B, sent to A)', sign(env, b), /different run/],
+      ['wrong gate', sign(env, statusA, { gateId: gateB.gateId }), /different/],
+      ['signed for another run', sign(env, statusB), /different run/],
       [
-        'stale artifact digests',
-        sign(env, a, {
-          artifacts: [{ ...a.gate!.artifacts[0]!, digest: 'f'.repeat(64) }, a.gate!.artifacts[1]!],
+        'stale artifact digest',
+        sign(env, statusA, {
+          artifacts: [{ ...firstArtifact, digest: DIGEST_F }, secondArtifact],
         }),
         /different artifacts/,
       ],
     ];
-    for (const [name, env_, pattern] of attempts) {
-      await expectRejected(submit(env, runA, env_), pattern).catch((e) => {
-        throw new Error(`${name}: ${e.message}`);
+    for (const [name, decision, reason] of badDecisions) {
+      await expectRejected(submit(env, runA, decision), reason).catch((error: unknown) => {
+        throw new Error(`${name}: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
-    expect((await query(env, runA)).status).toBe('WAITING_FOR_HUMAN_APPROVAL');
-    expect((await env.db.query('SELECT 1 FROM approvals WHERE run_id=$1', [runA])).rowCount).toBe(
-      0,
-    );
+    expect((await query(env, runA)).status).toBe(WAITING);
+    expect(await approvalRows(env, runA)).toEqual([]);
 
-    // Correctly signed, current-gate decision works and identity comes from trusted config.
-    const good = sign(env, a, { decision: 'reject', reason: 'not now' });
+    // A correctly signed decision for the current gate works; identity comes from the trusted config.
+    const good = sign(env, statusA, { decision: 'reject', reason: 'not now' });
     await submit(env, runA, good);
-    await env.client.workflow.getHandle(runA).result();
+    await finish(runA);
     const final = await query(env, runA);
     expect(final.status).toBe('REJECTED');
     expect(final.decision).toMatchObject({
@@ -164,85 +188,102 @@ describe('review gate and signed human approval (live Temporal + Postgres)', () 
       keyId: 'it-key',
     });
 
-    // Replay: reuse the consumed decisionId on run B with a fresh signature for B's gate.
+    // Replay: the consumed decision id cannot be reused, even with a fresh signature for another run's gate.
     await expectRejected(
-      submit(env, runB, sign(env, b, { decisionId: good.payload.decisionId })),
+      submit(env, runB, sign(env, statusB, { decisionId: good.payload.decisionId })),
       /replay/,
     );
-    // Replay of the exact envelope against the finished run A also fails.
-    await expect(submit(env, runA, good)).rejects.toBeTruthy();
-    expect((await query(env, runB)).status).toBe('WAITING_FOR_HUMAN_APPROVAL');
+    await expect(submit(env, runA, good)).rejects.toThrow();
+    expect((await query(env, runB)).status).toBe(WAITING);
 
-    // Run B can still be approved by a valid fresh decision; both outcomes persisted once.
-    await submit(env, runB, sign(env, b));
-    await env.client.workflow.getHandle(runB).result();
-    for (const [id, decision] of [
-      [runA, 'reject'],
-      [runB, 'approve'],
-    ] as const) {
-      const rows = (
-        await env.db.query(
-          'SELECT decision, source, actor, key_id FROM approvals WHERE run_id=$1',
-          [id],
-        )
-      ).rows;
-      expect(rows).toEqual([{ decision, source: 'human', actor: 'it-human', key_id: 'it-key' }]);
-    }
+    await submit(env, runB, sign(env, statusB));
+    await finish(runB);
+    expect(await approvalRows(env, runA)).toEqual([
+      { decision: 'reject', source: 'human', actor: 'it-human', key_id: 'it-key' },
+    ]);
+    expect(await approvalRows(env, runB)).toEqual([
+      { decision: 'approve', source: 'human', actor: 'it-human', key_id: 'it-key' },
+    ]);
   });
 
   it('an approval for previous results cannot approve revised results', async () => {
-    const runId = track(await startRun(env));
-    const wf = await waitForGate(env, runId);
-    const old = sign(env, wf);
+    const runId = await startTrackedRun();
+    const status = await waitForGate(env, runId);
+    const firstArtifact = status.gate?.artifacts[0];
+    if (!firstArtifact) {
+      throw new Error('gate has no artifacts');
+    }
+    const approvalForOldResults = sign(env, status);
+
     // Simulate a revised canonical artifact after the gate was opened.
     await env.db.query('UPDATE results SET digest=$2 WHERE result_id=$1', [
-      wf.gate!.artifacts[0]!.resultId,
-      'e'.repeat(64),
+      firstArtifact.resultId,
+      DIGEST_E,
     ]);
-    await expectRejected(submit(env, runId, old), /no longer current/);
-    expect((await query(env, runId)).status).toBe('WAITING_FOR_HUMAN_APPROVAL');
+
+    await expectRejected(submit(env, runId, approvalForOldResults), /no longer current/);
+    expect((await query(env, runId)).status).toBe(WAITING);
   });
 
-  it('first valid decision wins when approve and reject race; duplicates change nothing', async () => {
-    const runId = track(await startRun(env));
-    const wf = await waitForGate(env, runId);
-    const settled = await Promise.allSettled([
-      submit(env, runId, sign(env, wf, { decision: 'approve' })),
-      submit(env, runId, sign(env, wf, { decision: 'reject' })),
-      submit(env, runId, sign(env, wf, { decision: 'approve' })),
+  it('the first valid decision wins when approve and reject race; later duplicates change nothing', async () => {
+    const runId = await startTrackedRun();
+    const status = await waitForGate(env, runId);
+
+    const outcomes = await Promise.allSettled([
+      submit(env, runId, sign(env, status, { decision: 'approve' })),
+      submit(env, runId, sign(env, status, { decision: 'reject' })),
+      submit(env, runId, sign(env, status, { decision: 'approve' })),
     ]);
-    const ok = settled.filter((s) => s.status === 'fulfilled');
-    expect(ok).toHaveLength(1);
-    await env.client.workflow.getHandle(runId).result();
-    const final = await query(env, runId);
-    const winner = (ok[0] as PromiseFulfilledResult<{ decision: string }>).value.decision;
-    expect(final.status).toBe(winner === 'approve' ? 'APPROVED' : 'REJECTED');
-    const rows = (await env.db.query('SELECT decision FROM approvals WHERE run_id=$1', [runId]))
-      .rows;
-    expect(rows).toEqual([{ decision: winner }]);
-    // A late duplicate after completion cannot alter the outcome.
-    await expect(
-      submit(env, runId, sign(env, wf, { decision: winner === 'approve' ? 'reject' : 'approve' })),
-    ).rejects.toBeTruthy();
-    expect((await query(env, runId)).status).toBe(final.status);
+
+    const accepted = outcomes.flatMap((outcome) =>
+      outcome.status === 'fulfilled' ? [outcome.value] : [],
+    );
+    expect(accepted).toHaveLength(1);
+    const winner = accepted[0]?.decision;
+    await finish(runId);
+    expect((await query(env, runId)).status).toBe(winner === 'approve' ? 'APPROVED' : 'REJECTED');
+    expect(await approvalRows(env, runId)).toEqual([
+      { decision: winner, source: 'human', actor: 'it-human', key_id: 'it-key' },
+    ]);
+
+    const opposite = winner === 'approve' ? 'reject' : 'approve';
+    await expect(submit(env, runId, sign(env, status, { decision: opposite }))).rejects.toThrow();
+    expect((await query(env, runId)).status).toBe(winner === 'approve' ? 'APPROVED' : 'REJECTED');
   });
 
   it('waiting and decision processing survive a worker restart', async () => {
-    const runId = track(await startRun(env));
-    const wf = await waitForGate(env, runId);
+    const runId = await startTrackedRun();
+    const status = await waitForGate(env, runId);
     await worker.stop();
 
     // Submitted while no worker is running; it is processed once a worker returns.
-    const pending = submit(env, runId, sign(env, wf, { decision: 'approve' }));
-    await new Promise((r) => setTimeout(r, 1500));
+    const pending = submit(env, runId, sign(env, status, { decision: 'approve' }));
+    await sleep(WORKER_DOWN_MS);
     worker = await startWorker(env);
-    const ack = await pending;
-    expect(ack.decision).toBe('approve');
-    await env.client.workflow.getHandle(runId).result();
+
+    expect((await pending).decision).toBe('approve');
+    await finish(runId);
     expect((await query(env, runId)).status).toBe('APPROVED');
-    expect((await env.db.query('SELECT 1 FROM approvals WHERE run_id=$1', [runId])).rowCount).toBe(
-      1,
-    );
-    expect(newRunId()).toBeTruthy();
+    expect(await approvalRows(env, runId)).toHaveLength(1);
+  });
+
+  it('cannot verify any decision when the trusted-signer file is not configured or unreadable', async () => {
+    const runId = await startTrackedRun();
+    const status = await waitForGate(env, runId);
+
+    await worker.stop();
+    worker = await startWorker(env, { trustedSignersFile: undefined });
+    await expectRejected(submit(env, runId, sign(env, status)), /not configured/);
+
+    await worker.stop();
+    worker = await startWorker(env, { trustedSignersFile: path.join(env.keyDir, 'missing.json') });
+    await expectRejected(submit(env, runId, sign(env, status)), /unreadable or invalid/);
+    expect((await query(env, runId)).status).toBe(WAITING);
+    expect(await approvalRows(env, runId)).toEqual([]);
+
+    await worker.stop();
+    worker = await startWorker(env);
+    await submit(env, runId, sign(env, status));
+    await finish(runId);
   });
 });

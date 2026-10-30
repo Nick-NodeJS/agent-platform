@@ -1,6 +1,0 @@
-{
-  "extends": "../tsconfig.base.json",
-  "compilerOptions": { "composite": false, "noEmit": true, "declaration": false, "rootDir": ".." },
-  "include": ["./**/*.ts", "../apps/worker/src/**/*.ts"],
-  "exclude": ["../apps/worker/src/main.ts"]
-}

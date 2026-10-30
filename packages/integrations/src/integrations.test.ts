@@ -1,8 +1,13 @@
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { Approval, Result, Task } from '@platform/contracts';
+import {
+  ExecutorNotStartedError,
+  type Approval,
+  type Result,
+  type Task,
+} from '@platform/contracts';
 import {
   createExecutor,
   LocalTaskStore,
@@ -104,6 +109,14 @@ describe('LocalTaskStore', () => {
     expect(raw).toContain('[REDACTED]');
   });
 
+  it('cleans up its temporary file when a write fails and surfaces the error', async () => {
+    // A directory squatting on the JSON path makes the final rename fail after the temp file was written.
+    await mkdir(path.join(dir, 'task-1.json', 'occupied'), { recursive: true });
+    await expect(store.createTask(task())).rejects.toThrow();
+    const leftovers = (await readdir(dir)).filter((name) => name.endsWith('.tmp'));
+    expect(leftovers).toEqual([]);
+  });
+
   it('errors for unknown tasks', async () => {
     await expect(store.changeStatus('nope', 'APPROVED')).rejects.toThrow(/not found/);
   });
@@ -123,42 +136,49 @@ describe('executors', () => {
     timelineWeeks: 'unknown',
     notes: 'unknown',
   } as const;
-  it('mock researcher is deterministic, fictional, and records unknowns', async () => {
-    const ex = new MockAgentExecutor();
-    const req = {
-      role: 'researcher',
-      runId: 'r',
-      idempotencyKey: 'k',
-      input: { goal: 'g', constraints },
-    } as const;
-    const a = await ex.run<unknown, { fictionalExample: boolean; unknowns: string[] }>(req);
-    const b = await ex.run<unknown, unknown>(req);
-    expect(a.output).toEqual(b.output);
-    expect(a.output.fictionalExample).toBe(true);
-    expect(a.output.unknowns.join()).toContain('budgetUsd');
-    expect(a.usage.costUsd).toBe(0);
+  const researcherRequest = {
+    role: 'researcher',
+    runId: 'run-1',
+    idempotencyKey: 'key-1',
+    input: { goal: 'g', constraints },
+  } as const;
+
+  it('mock researcher is deterministic, fictional, and records unknown constraints', async () => {
+    const executor = new MockAgentExecutor();
+    const first = await executor.run(researcherRequest);
+    const second = await executor.run(researcherRequest);
+    expect(first.output).toEqual(second.output);
+    expect(first.output.fictionalExample).toBe(true);
+    expect(first.output.unknowns).toEqual([
+      'budgetUsd was not provided by the human owner',
+      'timelineWeeks was not provided by the human owner',
+      'notes was not provided by the human owner',
+    ]);
+    expect(first.usage.costUsd).toBe(0);
+    expect(first.executedBy).toBe('mock');
   });
 
   it('mock business owner never claims to be a human approval', async () => {
-    const ex = new MockAgentExecutor();
-    const r = await ex.run<unknown, { isHumanApproval: boolean }>({
+    const proposal = (await new MockAgentExecutor().run(researcherRequest)).output;
+    const evaluation = await new MockAgentExecutor().run({
       role: 'business-owner',
-      runId: 'r',
-      idempotencyKey: 'k',
-      input: { proposal: { title: 'x' }, constraints },
+      runId: 'run-1',
+      idempotencyKey: 'key-2',
+      input: { proposal, constraints },
     });
-    expect(r.output.isHumanApproval).toBe(false);
+    expect(evaluation.output.isHumanApproval).toBe(false);
+    expect(evaluation.output.rationale).toContain(proposal.title);
   });
 
-  it('real execution is rejected, never silently mocked', async () => {
-    await expect(
-      createExecutor('openhands').run({
-        role: 'researcher',
-        runId: 'r',
-        idempotencyKey: 'k',
-        input: {},
-      }),
-    ).rejects.toBeInstanceOf(RealExecutionNotImplementedError);
+  it('real execution is rejected as "not started", never silently mocked', async () => {
+    const attempt = createExecutor('openhands').run(researcherRequest);
+    await expect(attempt).rejects.toBeInstanceOf(RealExecutionNotImplementedError);
+    await expect(attempt).rejects.toBeInstanceOf(ExecutorNotStartedError);
+  });
+
+  it('createExecutor selects the mock only for mock mode', () => {
+    expect(createExecutor('mock')).toBeInstanceOf(MockAgentExecutor);
+    expect(createExecutor('openhands')).not.toBeInstanceOf(MockAgentExecutor);
   });
 });
 
@@ -176,7 +196,9 @@ describe('LocalTaskStore locks are per task', () => {
           ),
         ),
       );
-      for (const id of ids) expect(await store.getResults(id)).toHaveLength(10);
+      for (const id of ids) {
+        expect(await store.getResults(id)).toHaveLength(10);
+      }
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

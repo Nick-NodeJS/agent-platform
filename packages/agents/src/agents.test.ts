@@ -3,7 +3,10 @@ import { assertProfileConfigured, ProfileNotConfiguredError, ROLE_DEFINITIONS } 
 
 describe('model profile guard', () => {
   it('rejects the unconfigured placeholder profiles', () => {
-    const profile = ROLE_DEFINITIONS.researcher!.modelProfile;
+    const profile = ROLE_DEFINITIONS.researcher?.modelProfile;
+    if (!profile) {
+      throw new Error('researcher role must be defined');
+    }
     expect(() => assertProfileConfigured(profile, {})).toThrow(ProfileNotConfiguredError);
   });
   it('rejects missing credentials and zero budget', () => {

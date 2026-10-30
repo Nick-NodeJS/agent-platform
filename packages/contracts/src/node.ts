@@ -11,7 +11,6 @@ import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import {
   APPROVAL_CLOCK_SKEW_MS,
-  APPROVAL_VERSION,
   MAX_APPROVAL_VALIDITY_MS,
   approvalEnvelopeSchema,
   canonicalJson,
@@ -62,8 +61,9 @@ export function generateSigner(
 }
 
 export function signApproval(payload: ApprovalPayload, signer: SignerFile): ApprovalEnvelope {
-  if (payload.keyId !== signer.keyId || payload.actor !== signer.actor)
+  if (payload.keyId !== signer.keyId || payload.actor !== signer.actor) {
     throw new Error('payload signer identity does not match signer file');
+  }
   const signature = sign(
     null,
     Buffer.from(DOMAIN + canonicalJson(payload)),
@@ -97,14 +97,18 @@ export function verifyApproval(
   { gate, trusted, now }: VerifyContext,
 ): { payload: ApprovalPayload; actor: string; keyId: string; envelopeDigest: string } {
   const parsed = approvalEnvelopeSchema.safeParse(raw);
-  if (!parsed.success) throw new ApprovalRejectedError('malformed approval envelope');
+  if (!parsed.success) {
+    throw new ApprovalRejectedError('malformed approval envelope');
+  }
   const { payload, signature } = parsed.data;
-  if (payload.version !== APPROVAL_VERSION) throw new ApprovalRejectedError('unsupported version');
 
   const signer = trusted.find((s) => s.keyId === payload.keyId);
-  if (!signer) throw new ApprovalRejectedError('unknown signer key');
-  if (signer.actor !== payload.actor)
+  if (!signer) {
+    throw new ApprovalRejectedError('unknown signer key');
+  }
+  if (signer.actor !== payload.actor) {
     throw new ApprovalRejectedError('actor does not match trusted signer');
+  }
 
   let ok = false;
   try {
@@ -117,20 +121,28 @@ export function verifyApproval(
   } catch {
     ok = false;
   }
-  if (!ok) throw new ApprovalRejectedError('invalid signature');
+  if (!ok) {
+    throw new ApprovalRejectedError('invalid signature');
+  }
 
-  if (payload.runId !== gate.runId || payload.gateId !== gate.gateId)
+  if (payload.runId !== gate.runId || payload.gateId !== gate.gateId) {
     throw new ApprovalRejectedError('approval is for a different run or gate');
-  if (!sameArtifacts(payload.artifacts, gate.artifacts))
+  }
+  if (!sameArtifacts(payload.artifacts, gate.artifacts)) {
     throw new ApprovalRejectedError('approval is for different artifacts');
+  }
 
   const issued = Date.parse(payload.issuedAt);
   const expires = Date.parse(payload.expiresAt);
-  if (expires - issued > MAX_APPROVAL_VALIDITY_MS || expires <= issued)
+  if (expires - issued > MAX_APPROVAL_VALIDITY_MS || expires <= issued) {
     throw new ApprovalRejectedError('invalid validity window');
-  if (now.getTime() > expires) throw new ApprovalRejectedError('approval expired');
-  if (issued > now.getTime() + APPROVAL_CLOCK_SKEW_MS)
+  }
+  if (now.getTime() > expires) {
+    throw new ApprovalRejectedError('approval expired');
+  }
+  if (issued > now.getTime() + APPROVAL_CLOCK_SKEW_MS) {
     throw new ApprovalRejectedError('approval issued in the future');
+  }
 
   return {
     payload,

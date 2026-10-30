@@ -2,15 +2,18 @@ import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import pg from 'pg';
-import type {
-  Approval,
-  ApprovalEnvelope,
-  ArtifactRef,
-  ExecutionEvent,
-  Result,
-  ReviewGate,
-  Run,
-  Status,
+import { z } from 'zod';
+import {
+  artifactRefSchema,
+  resultKindSchema,
+  statusSchema,
+  type Approval,
+  type ApprovalEnvelope,
+  type ExecutionEvent,
+  type Result,
+  type ReviewGate,
+  type Run,
+  type Status,
 } from '@platform/contracts';
 
 export type Db = pg.Pool;
@@ -40,7 +43,9 @@ export async function migrate(db: Db, dir = MIGRATIONS_DIR): Promise<string[]> {
     );
     const files = (await readdir(dir)).filter((f) => f.endsWith('.sql')).sort();
     for (const file of files) {
-      if (done.has(file)) continue;
+      if (done.has(file)) {
+        continue;
+      }
       await client.query('BEGIN');
       try {
         await client.query(await readFile(path.join(dir, file), 'utf8'));
@@ -59,7 +64,8 @@ export async function migrate(db: Db, dir = MIGRATIONS_DIR): Promise<string[]> {
   return applied;
 }
 
-export type ExecutionState = 'pending' | 'running' | 'succeeded' | 'uncertain';
+const executionStateSchema = z.enum(['pending', 'running', 'succeeded', 'uncertain']);
+export type ExecutionState = z.infer<typeof executionStateSchema>;
 
 export interface ExecutionRecord {
   executionId: string;
@@ -84,29 +90,80 @@ export interface ExecutionRecord {
 export class StaleExecutionError extends Error {}
 export class ExecutionInputMismatchError extends Error {}
 
+// Database rows are an untrusted boundary for the compiler: parse them instead of asserting types.
+const executionRowSchema = z.object({
+  execution_id: z.string(),
+  run_id: z.string(),
+  role: z.string(),
+  stage: z.string(),
+  input_digest: z.string(),
+  state: executionStateSchema,
+  lease_owner: z.string().nullable(),
+  lease_expired: z.boolean(),
+  fence: z.number(),
+  invoked_at: z.date().nullable(),
+  attempts: z.number(),
+  result_id: z.string().nullable(),
+  output: z.record(z.unknown()).nullable(),
+  executed_by: z.string().nullable(),
+  cost_usd: z.number().nullable(),
+  steps: z.number().nullable(),
+  uncertain_reason: z.string().nullable(),
+});
+
+const resultRowSchema = z.object({
+  result_id: z.string(),
+  task_id: z.string(),
+  run_id: z.string(),
+  kind: resultKindSchema,
+  produced_by: z.enum(['mock', 'agent']),
+  payload: z.record(z.unknown()),
+  digest: z.string().nullable(),
+  created_at: z.date(),
+});
+
+const gateRowSchema = z.object({
+  gate_id: z.string(),
+  run_id: z.string(),
+  artifacts: z.array(artifactRefSchema),
+});
+
+const runSummaryRowSchema = z.object({
+  run_id: z.string(),
+  task_id: z.string(),
+  status: statusSchema,
+});
+
+const completedRowSchema = z.object({ run_id: z.string(), role: z.string(), attempts: z.number() });
+
+const costTotalRowSchema = z.object({ total: z.number() });
+
 const EXEC_COLUMNS = `execution_id, run_id, role, stage, input_digest, state, lease_owner,
   (lease_expires_at IS NULL OR lease_expires_at < now()) AS lease_expired, fence::int AS fence,
   invoked_at, attempts, result_id, output, executed_by, cost_usd::float AS cost_usd, steps, uncertain_reason`;
 
-const toExecution = (r: Record<string, unknown>): ExecutionRecord => ({
-  executionId: r['execution_id'] as string,
-  runId: r['run_id'] as string,
-  role: r['role'] as string,
-  stage: r['stage'] as string,
-  inputDigest: r['input_digest'] as string,
-  state: r['state'] as ExecutionState,
-  leaseOwner: r['lease_owner'] as string | null,
-  leaseExpired: r['lease_expired'] as boolean,
-  fence: r['fence'] as number,
-  invokedAt: r['invoked_at'] as Date | null,
-  attempts: r['attempts'] as number,
-  resultId: r['result_id'] as string | null,
-  output: r['output'] as Record<string, unknown> | null,
-  executedBy: r['executed_by'] as string | null,
-  costUsd: r['cost_usd'] as number | null,
-  steps: r['steps'] as number | null,
-  uncertainReason: r['uncertain_reason'] as string | null,
-});
+function toExecution(row: unknown): ExecutionRecord {
+  const r = executionRowSchema.parse(row);
+  return {
+    executionId: r.execution_id,
+    runId: r.run_id,
+    role: r.role,
+    stage: r.stage,
+    inputDigest: r.input_digest,
+    state: r.state,
+    leaseOwner: r.lease_owner,
+    leaseExpired: r.lease_expired,
+    fence: r.fence,
+    invokedAt: r.invoked_at,
+    attempts: r.attempts,
+    resultId: r.result_id,
+    output: r.output,
+    executedBy: r.executed_by,
+    costUsd: r.cost_usd,
+    steps: r.steps,
+    uncertainReason: r.uncertain_reason,
+  };
+}
 
 /** Canonical records live here. All writes are idempotent or fenced so Activity retries are safe. */
 export class RunRepository {
@@ -158,9 +215,11 @@ export class RunRepository {
   }
 
   async getResult(resultId: string): Promise<Result | undefined> {
-    const r = await this.db.query('SELECT * FROM results WHERE result_id = $1', [resultId]);
-    const row = r.rows[0];
-    if (!row) return undefined;
+    const found = await this.db.query('SELECT * FROM results WHERE result_id = $1', [resultId]);
+    if (found.rows.length === 0) {
+      return undefined;
+    }
+    const row = resultRowSchema.parse(found.rows[0]);
     return {
       resultId: row.result_id,
       taskId: row.task_id,
@@ -169,7 +228,7 @@ export class RunRepository {
       producedBy: row.produced_by,
       payload: row.payload,
       ...(row.digest ? { digest: row.digest } : {}),
-      createdAt: new Date(row.created_at).toISOString(),
+      createdAt: row.created_at.toISOString(),
     };
   }
 
@@ -240,7 +299,7 @@ export class RunRepository {
       'SELECT gate_id, run_id, artifacts FROM review_gates WHERE run_id=$1 AND revision=$2',
       [gate.runId, revision],
     );
-    const row = r.rows[0] as { gate_id: string; run_id: string; artifacts: ArtifactRef[] };
+    const row = gateRowSchema.parse(r.rows[0]);
     return { gateId: row.gate_id, runId: row.run_id, artifacts: row.artifacts };
   }
 
@@ -262,11 +321,15 @@ export class RunRepository {
        VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
       [e.executionId, e.runId, e.role, e.stage, e.inputDigest],
     );
-    const rec = (await this.getExecution(e.executionId))!;
-    if (rec.inputDigest !== e.inputDigest)
+    const rec = await this.getExecution(e.executionId);
+    if (!rec) {
+      throw new Error(`execution ${e.executionId} vanished after insert`);
+    }
+    if (rec.inputDigest !== e.inputDigest) {
       throw new ExecutionInputMismatchError(
         `execution ${e.executionId} already exists with different input; use a new stage/revision`,
       );
+    }
     return rec;
   }
 
@@ -320,8 +383,9 @@ export class RunRepository {
         WHERE execution_id=$1 AND lease_owner=$2 AND fence=$3 AND state='running' AND lease_expires_at >= now()`,
       [executionId, token, fence],
     );
-    if ((r.rowCount ?? 0) === 0)
+    if ((r.rowCount ?? 0) === 0) {
       throw new StaleExecutionError('lost claim before invoking executor');
+    }
   }
 
   /** The executor definitively did not run (e.g. rejected before any external call): undo the invocation. */
@@ -405,8 +469,10 @@ export class RunRepository {
           args.result.resultId,
         ],
       );
-      const row = upd.rows[0] as { run_id: string; role: string; attempts: number } | undefined;
-      if (!row) throw new StaleExecutionError('execution no longer owned by this attempt');
+      if (upd.rows.length === 0) {
+        throw new StaleExecutionError('execution no longer owned by this attempt');
+      }
+      const row = completedRowSchema.parse(upd.rows[0]);
       const r = args.result;
       await client.query(
         `INSERT INTO results (result_id, run_id, task_id, kind, produced_by, payload, digest, created_at)
@@ -446,7 +512,9 @@ export class RunRepository {
 
   async getRunSummary(runId: string) {
     const run = await this.db.query('SELECT * FROM runs WHERE run_id = $1', [runId]);
-    if (run.rowCount === 0) return undefined;
+    if (run.rowCount === 0) {
+      return undefined;
+    }
     const [results, approvals, events, costs, executions] = await Promise.all([
       this.db.query(
         'SELECT result_id, kind, produced_by FROM results WHERE run_id = $1 ORDER BY created_at',
@@ -467,12 +535,12 @@ export class RunRepository {
       this.listExecutions(runId),
     ]);
     return {
-      run: run.rows[0] as { run_id: string; task_id: string; status: Status },
+      run: runSummaryRowSchema.parse(run.rows[0]),
       results: results.rows,
       approvals: approvals.rows,
       events: events.rows,
       executions,
-      totalCostUsd: (costs.rows[0] as { total: number }).total,
+      totalCostUsd: costTotalRowSchema.parse(costs.rows[0]).total,
     };
   }
 }

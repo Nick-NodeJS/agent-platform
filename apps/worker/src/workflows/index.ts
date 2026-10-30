@@ -1,4 +1,5 @@
 import {
+  ActivityFailure,
   ApplicationFailure,
   allHandlersFinished,
   condition,
@@ -8,8 +9,7 @@ import {
   setHandler,
 } from '@temporalio/workflow';
 import {
-  approvalEnvelopeSchema,
-  sameArtifacts,
+  checkDecisionAgainstGate,
   type ApprovalEnvelope,
   type DecisionAck,
   type ResearchProposalInput,
@@ -23,26 +23,46 @@ import type { Activities } from '../activities.js';
 export const submitDecisionUpdate = defineUpdate<DecisionAck, [unknown]>('submitDecision');
 export const statusQuery = defineQuery<WorkflowStatus>('getStatus');
 
-const acts = proxyActivities<Activities>({
-  startToCloseTimeout: '1 minute',
+const ACTIVITY_TIMEOUT = '1 minute';
+const ACTIVITY_MAX_ATTEMPTS = 5;
+const ACTIVITY_RETRY_INITIAL_INTERVAL = '1s';
+const ACTIVITY_RETRY_BACKOFF_COEFFICIENT = 2;
+const ACTIVITY_RETRY_MAX_INTERVAL = '30s';
+
+const activities = proxyActivities<Activities>({
+  startToCloseTimeout: ACTIVITY_TIMEOUT,
   retry: {
-    maximumAttempts: 5,
-    initialInterval: '1s',
-    backoffCoefficient: 2,
-    maximumInterval: '30s',
+    maximumAttempts: ACTIVITY_MAX_ATTEMPTS,
+    initialInterval: ACTIVITY_RETRY_INITIAL_INTERVAL,
+    backoffCoefficient: ACTIVITY_RETRY_BACKOFF_COEFFICIENT,
+    maximumInterval: ACTIVITY_RETRY_MAX_INTERVAL,
     nonRetryableErrorTypes: ['ApprovalRejected'],
   },
 });
 
-const reject = (message: string, type = 'DecisionRejected'): never => {
+const rejectDecision = (message: string, type = 'DecisionRejected'): never => {
   throw ApplicationFailure.nonRetryable(message, type);
 };
+
+const verificationFailureMessage = (error: unknown): string => {
+  if (error instanceof ActivityFailure && error.cause instanceof ApplicationFailure) {
+    return error.cause.message;
+  }
+  return 'approval verification failed';
+};
+
+interface AcceptedDecision {
+  envelope: ApprovalEnvelope;
+  actor: string;
+  keyId: string;
+  verifiedAt: string;
+}
 
 /**
  * Researcher -> business owner (agent recommendation only) -> review gate -> human decision.
  *
- * Versioning note: the approval mechanism changed from an unsigned Signal to a signed Update. Workflows started by
- * the previous code (local mock-only runs) are NOT replay-compatible; start new runs and leave old histories alone.
+ * Versioning note: the approval mechanism changed from an unsigned Signal to a signed Update. Workflows started
+ * by the previous code (local mock-only runs) are NOT replay-compatible; start new runs and leave old histories alone.
  */
 export async function researchProposalWorkflow(
   input: ResearchProposalInput,
@@ -53,47 +73,39 @@ export async function researchProposalWorkflow(
     stages: [],
     resultIds: [],
   };
-  const enter = (status: Status) => {
+  const enterStage = (status: Status) => {
     state.status = status;
     state.stages.push({ stage: status, at: new Date().toISOString() });
   };
-  // The gate exists only after results are saved and the waiting projection succeeded. Decisions are never buffered.
-  let gate = undefined as ReviewGate | undefined;
-  let accepted:
-    { envelope: ApprovalEnvelope; actor: string; keyId: string; verifiedAt: string } | undefined;
 
-  /** Deterministic structural checks; used by the update validator and re-run after the async verification. */
-  const assertAccepting = (raw: unknown): ApprovalEnvelope => {
-    if (!gate)
-      return reject('review gate is not open yet; submit a fresh decision once the run is waiting');
-    if (accepted) return reject('a decision was already accepted for this gate');
-    const parsed = approvalEnvelopeSchema.safeParse(raw);
-    if (!parsed.success) return reject('malformed approval envelope');
-    const p = parsed.data.payload;
-    if (p.runId !== input.runId) return reject('decision is for a different run');
-    if (p.gateId !== gate.gateId) return reject('decision is for a different (stale) gate');
-    if (!sameArtifacts(p.artifacts, gate.artifacts))
-      return reject('decision is for different artifacts than the current gate');
-    return parsed.data;
+  // The gate exists only after results are saved and the waiting projection succeeded.
+  // Decisions are never buffered: anything submitted earlier was rejected by the validator.
+  const review: { gate?: ReviewGate; accepted?: AcceptedDecision } = {};
+
+  /** Structural gate check shared by the Update validator and the re-check after asynchronous verification. */
+  const checkDecision = (raw: unknown) => {
+    const check = checkDecisionAgainstGate(raw, {
+      runId: input.runId,
+      gate: review.gate,
+      alreadyAccepted: review.accepted !== undefined,
+    });
+    return check.ok ? check : rejectDecision(check.reason);
   };
 
   setHandler(statusQuery, () => state);
   setHandler(
     submitDecisionUpdate,
     async (raw) => {
-      const envelope = assertAccepting(raw);
-      const openGate = gate as ReviewGate;
+      const { envelope, gate } = checkDecision(raw);
       let verified;
       try {
-        verified = await acts.verifyApproval({ envelope, gate: openGate });
-      } catch (e) {
-        const cause = (e as { cause?: { message?: string } }).cause;
-        return reject(cause?.message ?? 'approval verification failed', 'ApprovalRejected');
+        verified = await activities.verifyApproval({ envelope, gate });
+      } catch (error) {
+        return rejectDecision(verificationFailureMessage(error), 'ApprovalRejected');
       }
-      // The gate may have been decided/changed while verification was awaiting: re-check, first valid decision wins.
-      if (gate !== openGate) return reject('review gate changed during verification');
-      assertAccepting(envelope);
-      accepted = {
+      // Another decision may have been accepted while verification was awaiting: first valid decision wins.
+      checkDecision(envelope);
+      review.accepted = {
         envelope,
         actor: verified.actor,
         keyId: verified.keyId,
@@ -101,25 +113,29 @@ export async function researchProposalWorkflow(
       };
       return {
         accepted: true,
-        gateId: openGate.gateId,
+        gateId: gate.gateId,
         decision: envelope.payload.decision,
         decisionId: envelope.payload.decisionId,
       };
     },
-    { validator: (raw) => void assertAccepting(raw) },
+    {
+      validator: (raw) => {
+        checkDecision(raw);
+      },
+    },
   );
 
-  enter('CREATED');
-  const { taskId } = await acts.createTaskAndRun({
+  enterStage('CREATED');
+  const { taskId } = await activities.createTaskAndRun({
     runId: input.runId,
     goal: input.goal,
     constraints: input.constraints,
   });
   state.taskId = taskId;
 
-  enter('RESEARCHING');
-  await acts.markStage({ runId: input.runId, taskId, stage: 'RESEARCHING' });
-  const research = await acts.runResearcher({
+  enterStage('RESEARCHING');
+  await activities.markStage({ runId: input.runId, taskId, stage: 'RESEARCHING' });
+  const research = await activities.runResearcher({
     runId: input.runId,
     taskId,
     goal: input.goal,
@@ -127,9 +143,9 @@ export async function researchProposalWorkflow(
   });
   state.resultIds.push(research.resultId);
 
-  enter('EVALUATING');
-  await acts.markStage({ runId: input.runId, taskId, stage: 'EVALUATING' });
-  const evaluation = await acts.runBusinessOwner({
+  enterStage('EVALUATING');
+  await activities.markStage({ runId: input.runId, taskId, stage: 'EVALUATING' });
+  const evaluation = await activities.runBusinessOwner({
     runId: input.runId,
     taskId,
     constraints: input.constraints,
@@ -137,30 +153,34 @@ export async function researchProposalWorkflow(
   state.resultIds.push(evaluation.resultId);
 
   // Results are canonical and saved; open the gate (persists the waiting status) and only then expose it.
-  const openedGate = await acts.openReviewGate({ runId: input.runId, taskId });
-  enter('WAITING_FOR_HUMAN_APPROVAL');
-  state.gate = openedGate;
-  gate = openedGate;
+  const reviewGate = await activities.openReviewGate({ runId: input.runId, taskId });
+  enterStage('WAITING_FOR_HUMAN_APPROVAL');
+  state.gate = reviewGate;
+  review.gate = reviewGate;
 
-  await condition(() => accepted !== undefined);
-  const final = accepted as NonNullable<typeof accepted>;
-  const payload = final.envelope.payload;
+  await condition(() => review.accepted !== undefined);
+  const { accepted } = review;
+  if (accepted === undefined) {
+    throw ApplicationFailure.nonRetryable('decision gate released without a decision');
+  }
+  const { envelope, actor, keyId, verifiedAt } = accepted;
+  const { payload } = envelope;
 
-  await acts.recordDecision({
+  await activities.recordDecision({
     runId: input.runId,
     taskId,
-    gate: openedGate,
-    envelope: final.envelope,
-    verifiedAt: final.verifiedAt,
+    gate: reviewGate,
+    envelope,
+    verifiedAt,
   });
   const finalStatus: Status = payload.decision === 'approve' ? 'APPROVED' : 'REJECTED';
-  await acts.markStage({ runId: input.runId, taskId, stage: finalStatus });
-  enter(finalStatus);
+  await activities.markStage({ runId: input.runId, taskId, stage: finalStatus });
+  enterStage(finalStatus);
   state.decision = {
     decision: payload.decision,
     source: 'human',
-    actor: final.actor,
-    keyId: final.keyId,
+    actor,
+    keyId,
     decisionId: payload.decisionId,
     ...(payload.reason ? { reason: payload.reason } : {}),
   };

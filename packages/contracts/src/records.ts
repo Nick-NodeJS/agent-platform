@@ -13,7 +13,10 @@ export const statusSchema = z.enum(STATUSES);
 export type Status = z.infer<typeof statusSchema>;
 
 const orUnknown = <T extends z.ZodTypeAny>(schema: T) =>
-  z.union([schema, z.literal('unknown')]).default('unknown' as never);
+  z
+    .union([schema, z.literal('unknown')])
+    .optional()
+    .transform((value) => value ?? ('unknown' as const));
 
 /** Real-world constraints are never guessed: anything not supplied is the literal 'unknown'. */
 export const resourceConstraintsSchema = z
