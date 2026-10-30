@@ -1,7 +1,10 @@
 # Local development
 
-1. `nvm use` (Node 22.12.0), `corepack enable` or install pnpm 9.9.0.
-2. `pnpm install --frozen-lockfile && cp .env.example .env && pnpm build`
+1. Linux only. Install the native build prerequisites once (`fs-ext` is compiled by node-gyp; Python is a build tool only):
+   `sudo apt-get install -y build-essential python3`. Then `nvm use` (Node 22.12.0) and `corepack enable` or install pnpm 9.9.0.
+2. `pnpm install --frozen-lockfile && cp .env.example .env && pnpm verify`. Workspace packages export their types from `dist/`,
+   so `pnpm verify` runs format check, **build**, lint, typecheck in that order; lint on a clean checkout fails if the build is skipped.
+   If `fs-ext` fails to build, `pnpm install` fails; scripts are never skipped.
 3. `pnpm infra:up` starts Postgres 16.15 (loopback `5433`, so it does not clash with a local `5432`) and the Temporal dev server 1.9.1 (gRPC `7233`, UI `8233`, both loopback only). Temporal's SQLite store lives in the `temporal-data` volume and is development-only.
 4. `pnpm db:migrate`, then once `pnpm cli approval-keygen --actor <name>` and add the printed `APPROVAL_TRUSTED_SIGNERS_FILE=...` (public keys only) to `.env`. Then `pnpm doctor` and `pnpm worker:start` in a separate terminal.
 5. Run the workflow with the commands in the README. `pnpm smoke` automates start, pause, forged-decision rejection, worker restart, signed approve/reject (using a temporary key outside the repo), and consistency checks. `pnpm test:integration` runs the live Temporal/Postgres suites in a temporary database that it drops afterwards.

@@ -24,7 +24,8 @@
     "test": "tsc -b && vitest run",
     "smoke": "node scripts/dist/smoke.js",
     "test:integration": "tsc -b && vitest run --config vitest.integration.config.ts",
-    "test:coverage": "tsc -b && vitest run --config vitest.coverage.config.ts --coverage"
+    "test:coverage": "tsc -b && vitest run --config vitest.coverage.config.ts --coverage",
+    "verify": "pnpm format:check && pnpm build && pnpm lint && pnpm typecheck"
   },
   "devDependencies": {
     "@eslint/js": "9",
@@ -44,5 +45,20 @@
     "typescript-eslint": "^8.72.1",
     "vitest": "^5.0.5",
     "zod": "^3.25.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@swc/core",
+      "@temporalio/core-bridge",
+      "esbuild",
+      "fs-ext"
+    ],
+    "packageExtensions": {
+      "fs-ext@2.1.1": {
+        "dependencies": {
+          "node-gyp": "10.3.1"
+        }
+      }
+    }
   }
 }

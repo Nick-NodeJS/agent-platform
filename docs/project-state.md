@@ -19,7 +19,7 @@ Monorepo, contracts, local task store, mock executor, Postgres persistence + mig
 1. Approvals only for the current review gate (Update + validator, gate bound to artifact IDs/digests, no buffering).
 2. Human approval is a verifiable Ed25519-signed envelope from a trusted human-controlled signer (not a string claim).
 3. Durable, fenced agent executions: reuse on retry, `uncertain` instead of blind re-runs, actual attempt accounting.
-4. Cross-process task file locking with forward-only status ordering and rebuildable Markdown.
+4. Cross-process task file locking with forward-only status ordering and rebuildable Markdown (now kernel `flock`, no stale-time lease).
 
 ## Code-quality scope
 
@@ -35,7 +35,7 @@ for giving the policy to future platform-spawned coding/review agents.
 - No real model execution; model profiles are placeholders.
 - Container/network/user isolation for agents is a documented plan only (`docs/architecture.md`); it must be enforced before any real agent execution. Signing does not protect against an agent running as the approver's OS user.
 - Exactly-once billing cannot be guaranteed by Postgres alone; external idempotency depends on the provider/runtime.
-- Task-file locking is verified on a local Linux filesystem only (not NFS/SMB).
+- The local task store is Linux/local-filesystem only (`flock` via `fs-ext`; native build needs `build-essential` + `python3`); no NFS/SMB, no multi-host coordination. The lock is advisory.
 - `pnpm test:coverage`, `pnpm test:integration` and `pnpm smoke` need Docker infra; CI starts it from `infra/compose.yaml` (unverified on GitHub until the next run).
 - Workflow code and process entry points are not counted by coverage; the branch-coverage margin over the 80% floor is under one point.
 - Pre-change workflow histories are not replay-compatible (start new runs).

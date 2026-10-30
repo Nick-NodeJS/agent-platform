@@ -87,13 +87,27 @@ explicit operator decisions and records real attempt counts. Mock executions cos
 
 ## LocalTaskStore concurrency
 
-Each task has one lock path (`<root>/.locks/<taskId>.lock`, `proper-lockfile`: atomic mkdir, mtime refresh every stale/2,
-takeover after `lockStaleMs`, default 30 s). Every operation, including `createTask` and both file projections, runs read-modify-write under that lock.
-Acquisition is bounded (`lockTimeoutMs`, default 15 s) with backoff timers. A killed holder is recovered after the stale window.
-Assumptions: local POSIX filesystem, sane clocks, no network filesystems. A live process stalled longer than the stale window can lose
-its lock; it detects this and aborts before writing. JSON is canonical; Markdown is rewritten on every operation (including
-idempotent retries) and via `rebuildProjection`. Status order is `CREATED < RESEARCHING < EVALUATING < WAITING_FOR_HUMAN_APPROVAL < APPROVED = REJECTED`:
-statuses only move forward and the first terminal status wins.
+Every task mutation (`createTask`, `attachResult`, `recordApproval`, `changeStatus`, `rebuildProjection`) is one read-modify-write
+under an exclusive advisory **Linux `flock(2)`** (`packages/integrations/src/file-lock.ts`, `fs-ext` native binding) on a stable
+file `<real root>/.locks/<taskId>.lock`. The descriptor stays open until both the JSON and Markdown publications finish, then the
+lock is released and the descriptor closed. Contenders poll with `exnb` and bounded backoff against a monotonic deadline
+(`lockTimeoutMs`, default 15 s) and fail with `LockTimeoutError`.
+
+- **No leases.** There is no stale timeout, mtime heartbeat or takeover. A live but paused writer keeps the lock and contenders
+  time out; the kernel releases the lock when the holder dies (even by SIGKILL), so recovery needs no waiting period.
+- The lock file is never unlinked, renamed or replaced (that could split contenders across inodes); small `.locks` files persist.
+- Independent opens contend even inside one process; descriptors are not inherited by child processes.
+- Publication: each file is written to a temporary name and renamed, so lock-free readers see a complete old or new JSON.
+  JSON is canonical; Markdown is published second and rebuilt from JSON by any later operation or `rebuildProjection`. The two
+  renames are not one atomic transaction and nothing is fsynced: power-loss durability is not promised.
+- **Supported:** Linux on local filesystems (Ubuntu host or Linux container). **Not supported:** macOS/Windows (the store throws
+  `UnsupportedPlatformError`, never a weaker fallback), NFS/SMB or network-synced folders, multi-host/cloud coordination (that would be a
+  separate task-store integration). The lock is advisory: every legitimate writer must use the store; an arbitrary editor can bypass it.
+- Build prerequisite: `fs-ext` is compiled by node-gyp (`build-essential`, `python3`); `package.json` pins `node-gyp` for its
+  install script via `pnpm.packageExtensions` and lists `fs-ext` in `pnpm.onlyBuiltDependencies`.
+
+Status order is `CREATED < RESEARCHING < EVALUATING < WAITING_FOR_HUMAN_APPROVAL < APPROVED = REJECTED`: statuses only move forward
+and the first terminal status wins.
 
 ## Workflow versioning
 

@@ -22,8 +22,9 @@ Read this before changing code. After a change, report which of the checks below
 
 Everything else below (naming, abstractions, comments, test quality) is a review responsibility.
 
-Applicable checks to report after a change: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm build`,
-`pnpm test:coverage` (needs `pnpm infra:up`), and `pnpm smoke` when the CLI, worker, workflow or persistence changed.
+Applicable checks to report after a change: `pnpm verify` (format check, build, lint, typecheck, in that order; lint and
+typecheck resolve workspace types from built `dist/`), `pnpm test:coverage` (needs `pnpm infra:up`), and `pnpm smoke` when the
+CLI, worker, workflow or persistence changed. `verify` does not run tests.
 
 ## Style and readability
 

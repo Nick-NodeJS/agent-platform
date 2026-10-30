@@ -19,11 +19,15 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: pnpm
+      # fs-ext (Linux flock binding for the local task store) is a native module built by node-gyp.
+      - name: Install native build prerequisites
+        timeout-minutes: 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential python3
       - run: pnpm install --frozen-lockfile
-      - run: pnpm format:check
-      - run: pnpm lint
-      - run: pnpm typecheck
-      - run: pnpm build
+      # Format check, build (workspace packages export types from dist/), lint, typecheck: one documented order.
+      - run: pnpm verify
       # Local infrastructure with dummy development values only; no secrets or cloud credentials are used.
       - name: Start Postgres and Temporal dev server
         run: |

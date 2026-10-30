@@ -4,7 +4,7 @@ Date: 2026-10-30. Host: Linux 6.2 (local filesystem, ext4-class), Docker 29.3.1.
 
 ## Versions
 
-Node 22.12.0, pnpm 9.9.0, TypeScript 5.9.3, Vitest 5.0.5, ESLint 9, Prettier 3.x, Zod 3.25.x, @temporalio/\* 1.25.0, pg 8.x, pino 9.x, proper-lockfile 4.1.2, `temporalio/temporal:1.9.1`, `postgres:16.15-alpine`.
+Node 22.12.0, pnpm 9.9.0, TypeScript 5.9.3, Vitest 5.0.5, ESLint 9, Prettier 3.x, Zod 3.25.x, @temporalio/\* 1.25.0, pg 8.x, pino 9.x, fs-ext 2.1.1 (node-gyp 10.3.1), `temporalio/temporal:1.9.1`, `postgres:16.15-alpine`.
 
 ## Executed and passed
 
@@ -80,3 +80,29 @@ running on GitHub for this change.
 - Workflow code and entry-point processes are not measured by coverage.
 - Branch coverage is close to the floor; new code needs tests, not threshold changes.
 - The policy is applied by context loading and tooling, not by prompts alone; no real coding agent exists yet to exercise `loadPolicyContext`.
+
+## CI order and flock task locks
+
+Executed on 2026-10-30 from a **clean temporary git worktree** of the commit (no `dist/`, no `*.tsbuildinfo`, no `node_modules`; the working
+checkout and its data were not touched; the worktree was removed afterwards). Node 22.12.0, pnpm 9.9.0, Ubuntu with `build-essential` and Python 3.10.
+
+| Check                                                             | Result                                                                                       |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile` (builds `fs-ext` with node-gyp)  | passed; `fs_ext.node` present                                                                |
+| `pnpm lint` BEFORE build (the previous CI order)                  | **failed with 1160 errors** (unresolved workspace types): reproduces the reported CI failure |
+| `pnpm verify` (format check, build, lint, typecheck)              | passed                                                                                       |
+| `pnpm test` (unit)                                                | 83 tests passed                                                                              |
+| `pnpm db:migrate`, `pnpm test:coverage` (unit + live integration) | 117 tests passed; lines 87.93%, branches 80.30%, statements 87.75%, functions 88.83%         |
+| `pnpm smoke`                                                      | 15 assertions passed                                                                         |
+
+Lock regression tests (checked-in typed subprocess fixture, bounded readiness barriers): concurrent creation from 6 processes;
+mixed result/approval/status writes from 14 processes with status ordering; **paused owner** (SIGSTOP after the temporary file is
+written, before rename) keeps the lock past the former 2.5 s stale window, the contender times out, then SIGCONT lets the owner finish and
+both updates remain; **killed owner** (SIGKILL) releases at once (no stale wait) and a kill between JSON and Markdown publication is
+repaired without duplicates; exceptions release the lock; separate instances in one process contend while unrelated tasks do not;
+the lock file keeps its inode and mode across contention and no descriptors leak; lock-free readers see only complete snapshots while
+writers publish; unsupported platforms fail with `UnsupportedPlatformError` before any lock file is created.
+
+Limitations: Linux and local filesystems only (not tested on NFS/SMB, macOS or Windows; those are unsupported by design); the lock is
+advisory; JSON and Markdown publication is not one atomic transaction and nothing is fsynced; the branch-coverage margin over the 80%
+floor is 0.3 points. The GitHub Actions run for the pushed SHA is reported separately after the push.

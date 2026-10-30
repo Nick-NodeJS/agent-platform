@@ -1,8 +1,7 @@
-import { mkdir, readFile, rename, writeFile, unlink } from 'node:fs/promises';
-import lockfile from 'proper-lockfile';
-import { z } from 'zod';
+import { mkdir, readFile, realpath, rename, writeFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import {
   approvalSchema,
   idSchema,
@@ -14,6 +13,7 @@ import {
   type Task,
   type TaskStore,
 } from '@platform/contracts';
+import { withExclusiveLock } from './file-lock.js';
 import { redactDeep } from './redact.js';
 
 const taskFileSchema = z.object({
@@ -26,19 +26,23 @@ type TaskFile = z.infer<typeof taskFileSchema>;
 const hasErrorCode = (error: unknown, code: string): boolean =>
   error instanceof Error && 'code' in error && error.code === code;
 
+const DEFAULT_LOCK_TIMEOUT_MS = 15_000;
+
+type Hook = () => Promise<void> | void;
+
 export interface LocalTaskStoreOptions {
   rootDir: string;
   markdown?: boolean;
-  /** Max time to wait for a task lock before failing (default 15s). */
+  /** Max time to wait for a contended task lock before failing with LockTimeoutError (default 15 s). */
   lockTimeoutMs?: number;
-  /** A lock whose mtime is older than this is considered abandoned (default 30s, min 2s). Holders refresh every stale/2. */
-  lockStaleMs?: number;
-  /** Test-only fault injection points. */
-  hooks?: { afterLock?: () => Promise<void> | void; afterJsonWrite?: () => Promise<void> | void };
+  /** Test-only fault injection points; they run while the task lock is held. */
+  hooks?: {
+    afterLock?: Hook;
+    /** After the temporary JSON file is written, before it is renamed over the canonical file. */
+    beforeJsonPublish?: Hook;
+    afterJsonWrite?: Hook;
+  };
 }
-
-export class LockTimeoutError extends Error {}
-export class LockCompromisedError extends Error {}
 
 /**
  * Status ordering. Concurrent/retried status writes are resolved by this order, not by arrival time:
@@ -52,31 +56,32 @@ const STATUS_RANK: Record<Status, number> = {
   APPROVED: 4,
   REJECTED: 4,
 };
-const isTerminal = (s: Status) => STATUS_RANK[s] === 4;
+const TERMINAL_RANK = 4;
+const isTerminal = (status: Status) => STATUS_RANK[status] === TERMINAL_RANK;
 
 /**
- * JSON-file task store with Markdown projection.
+ * JSON-file task store with a Markdown projection.
  *
- * Cross-process safety: every operation (including createTask and the JSON+Markdown writes) is a
- * read-modify-write under one lock per task at `<root>/.locks/<taskId>.lock`, implemented with
- * `proper-lockfile` (atomic mkdir; holder refreshes the lock mtime; locks not refreshed for `lockStaleMs`
- * are taken over). Guarantees hold on local POSIX filesystems with sane clocks; NOT on NFS/SMB or
- * network-synced folders. A live holder that stalls longer than `lockStaleMs` (e.g. event loop blocked)
- * may lose the lock; it detects this (`onCompromised`) and aborts before renaming over the JSON.
- * JSON is canonical; Markdown is a rebuildable projection.
+ * Writers: every mutation (createTask, attachResult, recordApproval, changeStatus, rebuildProjection) is one
+ * read-modify-write under an exclusive Linux `flock` on `<root>/.locks/<taskId>.lock` (see file-lock.ts). The lock is
+ * held until both files are published; it has no expiry, so a paused writer keeps it and contenders time out. The
+ * kernel drops it when a writer dies. Supported: Linux, local filesystems. Not supported: NFS/SMB, network-synced
+ * folders, multi-host coordination. The lock is advisory: every legitimate writer must go through this class.
+ *
+ * Publication: each file is written to a temporary name and renamed into place, so readers (which take no lock) always
+ * see a complete old or new file. JSON is canonical; Markdown is published second and can be rebuilt from the JSON.
+ * The two renames are NOT one atomic transaction, and nothing is fsynced, so power-loss durability is not promised.
  */
 export class LocalTaskStore implements TaskStore {
   private readonly root: string;
   private readonly markdown: boolean;
   private readonly lockTimeoutMs: number;
-  private readonly lockStaleMs: number;
   private readonly hooks: NonNullable<LocalTaskStoreOptions['hooks']>;
 
   constructor(options: LocalTaskStoreOptions) {
     this.root = path.resolve(options.rootDir);
     this.markdown = options.markdown ?? true;
-    this.lockTimeoutMs = options.lockTimeoutMs ?? 15_000;
-    this.lockStaleMs = Math.max(options.lockStaleMs ?? 30_000, 2000);
+    this.lockTimeoutMs = options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS;
     this.hooks = options.hooks ?? {};
   }
 
@@ -93,53 +98,19 @@ export class LocalTaskStore implements TaskStore {
     return this.filePath(taskId);
   }
 
-  private lockPath(taskId: string): string {
+  /** One stable lock file per validated task id, derived from the real root so every instance/process agrees. */
+  private async lockPath(taskId: string): Promise<string> {
     const safe = idSchema.parse(taskId);
-    return path.join(this.root, '.locks', `${safe}.lock`);
+    await mkdir(this.root, { recursive: true });
+    return path.join(await realpath(this.root), '.locks', `${safe}.lock`);
   }
 
-  private async withLock<T>(
-    taskId: string,
-    fn: (assertHeld: () => void) => Promise<T>,
-  ): Promise<T> {
-    const lockPath = this.lockPath(taskId);
-    await mkdir(path.dirname(lockPath), { recursive: true });
-    const deadline = Date.now() + this.lockTimeoutMs;
-    let compromised: Error | undefined;
-    let release: (() => Promise<void>) | undefined;
-    for (let delay = 10; !release; delay = Math.min(delay * 2, 200)) {
-      try {
-        // `file` must be unique per task: proper-lockfile keys its in-process lock registry by it.
-        release = await lockfile.lock(lockPath, {
-          lockfilePath: lockPath,
-          realpath: false,
-          stale: this.lockStaleMs,
-          update: Math.floor(this.lockStaleMs / 2),
-          retries: 0,
-          onCompromised: (err) => {
-            compromised = new LockCompromisedError(err.message);
-          },
-        });
-      } catch (e) {
-        if (!hasErrorCode(e, 'ELOCKED')) {
-          throw e;
-        }
-        if (Date.now() + delay > deadline) {
-          throw new LockTimeoutError(`timed out locking task ${taskId}`);
-        }
-        await new Promise((r) => setTimeout(r, delay + Math.random() * delay));
-      }
-    }
-    try {
+  private async withLock<T>(taskId: string, action: () => Promise<T>): Promise<T> {
+    const lockPath = await this.lockPath(taskId);
+    return withExclusiveLock(lockPath, { timeoutMs: this.lockTimeoutMs }, async () => {
       await this.hooks.afterLock?.();
-      return await fn(() => {
-        if (compromised) {
-          throw compromised;
-        }
-      });
-    } finally {
-      await release().catch(() => undefined);
-    }
+      return action();
+    });
   }
 
   private async read(taskId: string): Promise<TaskFile | undefined> {
@@ -154,75 +125,70 @@ export class LocalTaskStore implements TaskStore {
     }
   }
 
-  private async atomicWrite(target: string, content: string): Promise<void> {
+  private async atomicWrite(target: string, content: string, beforePublish?: Hook): Promise<void> {
     const tmp = `${target}.${randomUUID()}.tmp`;
     try {
       await writeFile(tmp, content, 'utf8');
+      await beforePublish?.();
       await rename(tmp, target);
-    } catch (e) {
-      await unlink(tmp).catch(() => undefined);
-      throw e;
+    } catch (error) {
+      await unlink(tmp).catch(() => {
+        // The temporary file may never have been created; the original failure is what matters.
+      });
+      throw error;
     }
   }
 
-  /** Must be called with the task lock held. JSON first (canonical), then Markdown. */
-  private async writeLocked(
-    file: TaskFile,
-    assertHeld: () => void,
-    jsonChanged: boolean,
-  ): Promise<void> {
-    await mkdir(this.root, { recursive: true });
+  /** Must run with the task lock held. JSON first (canonical), then Markdown. */
+  private async publish(file: TaskFile, jsonChanged: boolean): Promise<void> {
+    const safeFile = redactTaskFile(file);
     if (jsonChanged) {
-      assertHeld();
       await this.atomicWrite(
         this.filePath(file.task.taskId),
-        JSON.stringify(redactTaskFile(file), null, 2),
+        JSON.stringify(safeFile, null, 2),
+        this.hooks.beforeJsonPublish,
       );
       await this.hooks.afterJsonWrite?.();
     }
     if (this.markdown) {
-      assertHeld();
-      await this.atomicWrite(
-        this.filePath(file.task.taskId, 'md'),
-        renderMarkdown(redactTaskFile(file)),
-      );
+      await this.atomicWrite(this.filePath(file.task.taskId, 'md'), renderMarkdown(safeFile));
     }
   }
 
-  private mutate(taskId: string, fn: (f: TaskFile) => boolean): Promise<Task> {
-    return this.withLock(taskId, async (assertHeld) => {
+  private mutate(taskId: string, apply: (file: TaskFile) => boolean): Promise<Task> {
+    return this.withLock(taskId, async () => {
       const file = await this.read(taskId);
       if (!file) {
         throw new Error(`task not found: ${taskId}`);
       }
-      const changed = fn(file);
+      const changed = apply(file);
       // Always re-project: a retry after a crash between the JSON and Markdown writes repairs the Markdown.
-      await this.writeLocked(file, assertHeld, changed);
+      await this.publish(file, changed);
       return file.task;
     });
   }
 
   async createTask(input: Task): Promise<Task> {
     const task = taskSchema.parse(input);
-    return await this.withLock(task.taskId, async (assertHeld) => {
+    return await this.withLock(task.taskId, async () => {
       const existing = await this.read(task.taskId);
       if (existing) {
-        await this.writeLocked(existing, assertHeld, false);
+        await this.publish(existing, false);
         return existing.task;
       }
-      await this.writeLocked({ task, results: [], approvals: [] }, assertHeld, true);
+      await this.publish({ task, results: [], approvals: [] }, true);
       return task;
     });
   }
 
   /** Rebuild the Markdown projection from canonical JSON (e.g. after a crash). False for unknown tasks. */
   async rebuildProjection(taskId: string): Promise<boolean> {
-    return this.withLock(taskId, async (assertHeld) => {
+    return this.withLock(taskId, async () => {
       const file = await this.read(taskId);
       if (!file) {
         return false;
       }
-      await this.writeLocked(file, assertHeld, false);
+      await this.publish(file, false);
       return true;
     });
   }

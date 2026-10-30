@@ -1,15 +1,17 @@
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { readdirSync } from 'node:fs';
+import { mkdtemp, readdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { Task } from '@platform/contracts';
-import { LocalTaskStore } from './index.js';
+import type { Result, Task } from '@platform/contracts';
+import { LocalTaskStore, LockTimeoutError } from './index.js';
 
 // The fixture is compiled with the package (src/fixtures/store-child.ts); `pnpm test` builds first.
 const fixture = fileURLToPath(new URL('../dist/fixtures/store-child.js', import.meta.url));
-const ts = '2026-01-01T00:00:00.000Z';
+const TIMESTAMP = '2026-01-01T00:00:00.000Z';
+
 const task = (id: string): Task => ({
   taskId: id,
   runId: 'run-1',
@@ -18,33 +20,47 @@ const task = (id: string): Task => ({
   status: 'CREATED',
   resultIds: [],
   approvalIds: [],
-  createdAt: ts,
-  updatedAt: ts,
+  createdAt: TIMESTAMP,
+  updatedAt: TIMESTAMP,
+});
+
+const result = (taskId: string, resultId: string): Result => ({
+  resultId,
+  taskId,
+  runId: 'run-1',
+  kind: 'research-proposal',
+  producedBy: 'mock',
+  payload: { id: resultId },
+  createdAt: TIMESTAMP,
 });
 
 const READY_POLL_MS = 20;
-const LOCK_STALE_MS = 2500;
 const CHILD_WAIT_MS = 15_000;
+/** Longer than the 2.5 s "stale" window the previous mtime-based lock used; proves there is no expiry any more. */
+const PAUSED_OWNER_OBSERVATION_MS = 3000;
+const NO_STALE_WAIT_BOUND_MS = 1500;
+const CONTENDED_ATTEMPT_TIMEOUT_MS = 30;
+const CONTENDED_ATTEMPTS = 40;
+const LOCK_MODE_MASK = 0o777;
+const LOCK_FILE_MODE = 0o600;
 
 const children = new Set<ChildProcess>();
 
 /** Spawns one fixture operation. `waitFor` is a readiness barrier on the child's stdout, bounded by a timeout. */
 const child = (...args: string[]) => {
-  const process_ = spawn(process.execPath, [fixture, ...args], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  children.add(process_);
+  const proc = spawn(process.execPath, [fixture, ...args], { stdio: ['pipe', 'pipe', 'pipe'] });
+  children.add(proc);
   let stdout = '';
   let stderr = '';
-  process_.stdout.on('data', (chunk: Buffer) => {
+  proc.stdout.on('data', (chunk: Buffer) => {
     stdout += chunk.toString();
   });
-  process_.stderr.on('data', (chunk: Buffer) => {
+  proc.stderr.on('data', (chunk: Buffer) => {
     stderr += chunk.toString();
   });
 
   const done = new Promise<{ code: number | null; out: string; err: string }>((resolve) => {
-    process_.on('exit', (code) => resolve({ code, out: stdout, err: stderr }));
+    proc.on('exit', (code) => resolve({ code, out: stdout, err: stderr }));
   });
 
   const waitFor = (text: string) =>
@@ -54,14 +70,19 @@ const child = (...args: string[]) => {
         if (stdout.includes(text)) {
           clearInterval(timer);
           resolve();
-        } else if (Date.now() > deadline || process_.exitCode !== null) {
+        } else if (Date.now() > deadline || proc.exitCode !== null) {
           clearInterval(timer);
           reject(new Error(`child never printed "${text}": ${stderr}`));
         }
       }, READY_POLL_MS);
     });
 
-  return { process: process_, done, waitFor };
+  return {
+    process: proc,
+    done,
+    waitFor,
+    send: (line: string) => proc.stdin.write(line),
+  };
 };
 
 const requireTask = async (store: LocalTaskStore, taskId: string): Promise<Task> => {
@@ -72,27 +93,31 @@ const requireTask = async (store: LocalTaskStore, taskId: string): Promise<Task>
   return found;
 };
 
-describe('LocalTaskStore across processes', () => {
+const openFileDescriptors = () => readdirSync('/proc/self/fd').length;
+
+describe('LocalTaskStore across processes (Linux flock)', () => {
   let dir: string;
   beforeEach(async () => {
     dir = await mkdtemp(path.join(os.tmpdir(), 'tasks-xproc-'));
   });
   afterEach(async () => {
-    for (const p of children) {
-      p.kill('SIGKILL');
+    // A stopped process ignores SIGKILL delivery until continued on some kernels; always continue first.
+    for (const proc of children) {
+      proc.kill('SIGCONT');
+      proc.kill('SIGKILL');
     }
     children.clear();
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('concurrent creation from many processes is safe', async () => {
+  it('concurrent creation of the same task from many processes is safe', async () => {
     const runs = await Promise.all(
       Array.from({ length: 6 }, () => child('create', dir, 'task-1').done),
     );
-    expect(runs.every((r) => r.code === 0)).toBe(true);
+    expect(runs.map((run) => run.code)).toEqual(runs.map(() => 0));
     const store = new LocalTaskStore({ rootDir: dir });
-    expect((await store.getTask('task-1'))?.taskId).toBe('task-1');
-    expect((await readdir(dir)).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    expect((await requireTask(store, 'task-1')).taskId).toBe('task-1');
+    expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
   it('concurrent result, approval and status writes from separate processes preserve every update', async () => {
@@ -103,18 +128,21 @@ describe('LocalTaskStore across processes', () => {
       child('status', dir, 'task-1', 'RESEARCHING'),
       child('status', dir, 'task-1', 'EVALUATING'),
     ];
-    const results = await Promise.all(jobs.map((j) => j.done));
-    expect(results.map((r) => r.code)).toEqual(results.map(() => 0));
+    const outcomes = await Promise.all(jobs.map((job) => job.done));
+    expect(outcomes.map((outcome) => outcome.code)).toEqual(outcomes.map(() => 0));
+
     const store = new LocalTaskStore({ rootDir: dir });
-    const t = await requireTask(store, 'task-1');
-    expect(t.resultIds.sort()).toEqual(Array.from({ length: 8 }, (_, i) => `res-${i}`).sort());
-    expect(t.approvalIds).toHaveLength(4);
-    expect((await store.getResults('task-1')).length).toBe(8);
+    const stored = await requireTask(store, 'task-1');
+    expect([...stored.resultIds].sort()).toEqual(
+      Array.from({ length: 8 }, (_, i) => `res-${i}`).sort(),
+    );
+    expect(stored.approvalIds).toHaveLength(4);
+    expect(await store.getResults('task-1')).toHaveLength(8);
     // Defined ordering: statuses only move forward, regardless of arrival order.
-    expect(t.status).toBe('EVALUATING');
-    const md = await readFile(path.join(dir, 'task-1.md'), 'utf8');
+    expect(stored.status).toBe('EVALUATING');
+    const markdown = await readFile(path.join(dir, 'task-1.md'), 'utf8');
     for (let i = 0; i < 8; i++) {
-      expect(md).toContain(`res-${i}`);
+      expect(markdown).toContain(`res-${i}`);
     }
   });
 
@@ -123,87 +151,208 @@ describe('LocalTaskStore across processes', () => {
     await store.createTask(task('task-1'));
     await store.changeStatus('task-1', 'WAITING_FOR_HUMAN_APPROVAL');
     await store.changeStatus('task-1', 'RESEARCHING');
-    expect((await store.getTask('task-1'))?.status).toBe('WAITING_FOR_HUMAN_APPROVAL');
+    expect((await requireTask(store, 'task-1')).status).toBe('WAITING_FOR_HUMAN_APPROVAL');
     await store.changeStatus('task-1', 'REJECTED');
     await store.changeStatus('task-1', 'APPROVED');
     await store.changeStatus('task-1', 'EVALUATING');
-    expect((await store.getTask('task-1'))?.status).toBe('REJECTED');
+    expect((await requireTask(store, 'task-1')).status).toBe('REJECTED');
   });
 
-  it('a killed lock holder does not block writers forever; Markdown is rebuilt without duplicates', async () => {
-    const store = new LocalTaskStore({
-      rootDir: dir,
-      lockStaleMs: LOCK_STALE_MS,
-      lockTimeoutMs: CHILD_WAIT_MS * 2,
-    });
+  it('a paused (SIGSTOP) owner keeps the lock: contenders time out instead of stealing it, and no update is lost', async () => {
+    const store = new LocalTaskStore({ rootDir: dir, lockTimeoutMs: PAUSED_OWNER_OBSERVATION_MS });
     await store.createTask(task('task-1'));
-    const holder = child('hold-after-json', dir, 'task-1', 'res-held');
-    await holder.waitFor('JSON-WRITTEN');
-    holder.process.kill('SIGKILL');
-    await holder.done;
+
+    const owner = child('pause-before-publish', dir, 'task-1', 'res-owner');
+    await owner.waitFor('PAUSED-BEFORE-PUBLISH'); // lock held, temporary file written, rename not yet done
+    owner.process.kill('SIGSTOP');
 
     const started = Date.now();
-    await store.attachResult('task-1', {
-      resultId: 'res-after',
-      taskId: 'task-1',
-      runId: 'run-1',
-      kind: 'research-proposal',
-      producedBy: 'mock',
-      payload: {},
-      createdAt: ts,
-    });
-    expect(Date.now() - started).toBeGreaterThanOrEqual(1000);
+    await expect(
+      store.attachResult('task-1', result('task-1', 'res-waiter')),
+    ).rejects.toBeInstanceOf(LockTimeoutError);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(PAUSED_OWNER_OBSERVATION_MS - 200);
+    // The owner has published nothing yet; lock-free readers still see a valid old snapshot.
+    expect(await store.getResults('task-1')).toEqual([]);
 
-    // The killed process wrote JSON (canonical) but never the Markdown; retrying its op must not duplicate.
-    const retry = await child('attach', dir, 'task-1', 'res-held').done;
-    expect(retry.code).toBe(0);
-    const t = await requireTask(store, 'task-1');
-    expect(t.resultIds.sort()).toEqual(['res-after', 'res-held']);
-    const md = await readFile(path.join(dir, 'task-1.md'), 'utf8');
-    expect(md).toContain('res-held');
-    expect((md.match(/\(res-held,/g) ?? []).length).toBe(1);
-    expect(
-      (await store.getResults('task-1')).filter((r) => r.resultId === 'res-held'),
-    ).toHaveLength(1);
+    owner.process.kill('SIGCONT');
+    owner.send('go\n');
+    expect((await owner.done).code).toBe(0);
+
+    await store.attachResult('task-1', result('task-1', 'res-waiter'));
+    const stored = await requireTask(store, 'task-1');
+    expect([...stored.resultIds].sort()).toEqual(['res-owner', 'res-waiter']);
+    expect(await store.getResults('task-1')).toHaveLength(2);
   });
 
-  it('a waiting writer times out (bounded) when the holder is alive', async () => {
+  it('a killed owner releases the lock immediately (no stale wait); a kill between publications is repaired', async () => {
+    const store = new LocalTaskStore({ rootDir: dir, lockTimeoutMs: CHILD_WAIT_MS });
+    await store.createTask(task('task-1'));
+
+    const holder = child('hold', dir, 'task-1');
+    await holder.waitFor('LOCKED');
+    holder.process.kill('SIGKILL');
+    await holder.done;
+    const started = Date.now();
+    await store.changeStatus('task-1', 'RESEARCHING');
+    expect(Date.now() - started).toBeLessThan(NO_STALE_WAIT_BOUND_MS);
+
+    const writer = child('hold-after-json', dir, 'task-1', 'res-killed');
+    await writer.waitFor('JSON-WRITTEN');
+    writer.process.kill('SIGKILL');
+    await writer.done;
+
+    // JSON (canonical) was published and is valid; the Markdown projection missed that update.
+    expect((await store.getResults('task-1')).map((r) => r.resultId)).toEqual(['res-killed']);
+    expect(await readFile(path.join(dir, 'task-1.md'), 'utf8')).not.toContain('res-killed');
+
+    expect(await store.rebuildProjection('task-1')).toBe(true);
+    expect(await readFile(path.join(dir, 'task-1.md'), 'utf8')).toContain('res-killed');
+    // Retrying the interrupted operation is idempotent: no duplicate result.
+    expect((await child('attach', dir, 'task-1', 'res-killed').done).code).toBe(0);
+    expect(await store.getResults('task-1')).toHaveLength(1);
+    expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('a waiting writer times out (bounded) while the holder is alive', async () => {
     await new LocalTaskStore({ rootDir: dir }).createTask(task('task-1'));
     const holder = child('hold', dir, 'task-1');
     await holder.waitFor('LOCKED');
-    const impatient = new LocalTaskStore({ rootDir: dir, lockTimeoutMs: 600, lockStaleMs: 30000 });
-    await expect(impatient.changeStatus('task-1', 'RESEARCHING')).rejects.toThrow(/timed out/);
+    const impatient = new LocalTaskStore({ rootDir: dir, lockTimeoutMs: 600 });
+    await expect(impatient.changeStatus('task-1', 'RESEARCHING')).rejects.toBeInstanceOf(
+      LockTimeoutError,
+    );
   });
+});
 
-  it('exceptions inside the critical section release the lock', async () => {
-    let boom = true;
+describe('LocalTaskStore inside one process', () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(os.tmpdir(), 'tasks-inproc-'));
+  });
+  afterEach(() => rm(dir, { recursive: true, force: true }));
+
+  it('an exception inside the protected operation releases the lock for the next writer', async () => {
+    let failNextPublish = true;
     const store = new LocalTaskStore({
       rootDir: dir,
       lockTimeoutMs: 1000,
       hooks: {
         afterJsonWrite: () => {
-          if (boom) {
+          if (failNextPublish) {
             throw new Error('crash between JSON and Markdown');
           }
         },
       },
     });
     await expect(store.createTask(task('task-1'))).rejects.toThrow(/crash/);
-    boom = false;
-    // Lock was released: the retry does not wait for staleness, and repairs the missing Markdown projection.
-    const started = Date.now();
-    await store.createTask(task('task-1'));
-    expect(Date.now() - started).toBeLessThan(900);
+    failNextPublish = false;
+
+    await store.createTask(task('task-1')); // acquires at once and repairs the missing Markdown
     expect(await readFile(path.join(dir, 'task-1.md'), 'utf8')).toContain('task-1');
-    expect((await readdir(dir)).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+    expect((await readdir(dir)).filter((name) => name.endsWith('.tmp'))).toEqual([]);
   });
 
-  it('interrupted Markdown projection can be rebuilt from canonical JSON', async () => {
-    const store = new LocalTaskStore({ rootDir: dir });
+  it('separate instances contend on the same task, while unrelated tasks do not block each other', async () => {
+    let releaseHolder = () => {};
+    const holderGate = new Promise<void>((resolve) => {
+      releaseHolder = resolve;
+    });
+    let holderHasLock = () => {};
+    const holderLocked = new Promise<void>((resolve) => {
+      holderHasLock = resolve;
+    });
+    const holder = new LocalTaskStore({
+      rootDir: dir,
+      hooks: {
+        afterLock: async () => {
+          holderHasLock();
+          await holderGate;
+        },
+      },
+    });
+    const other = new LocalTaskStore({ rootDir: dir, lockTimeoutMs: 300 });
+    await other.createTask(task('task-b'));
+
+    const holding = holder.createTask(task('task-a'));
+    await holderLocked;
+
+    await expect(other.createTask(task('task-a'))).rejects.toBeInstanceOf(LockTimeoutError);
+    await other.changeStatus('task-b', 'RESEARCHING'); // different task: not blocked
+    expect((await requireTask(other, 'task-b')).status).toBe('RESEARCHING');
+
+    releaseHolder();
+    await holding;
+    await other.createTask(task('task-a'));
+    expect((await requireTask(other, 'task-a')).taskId).toBe('task-a');
+  });
+
+  it('never deletes or replaces the lock file, and repeated contention does not leak descriptors', async () => {
+    const store = new LocalTaskStore({ rootDir: dir, lockTimeoutMs: CONTENDED_ATTEMPT_TIMEOUT_MS });
     await store.createTask(task('task-1'));
-    await rm(path.join(dir, 'task-1.md'));
-    expect(await store.rebuildProjection('task-1')).toBe(true);
-    expect(await readFile(path.join(dir, 'task-1.md'), 'utf8')).toContain('# t');
-    expect(await store.rebuildProjection('missing-task')).toBe(false);
+    const lockFile = path.join(await realpath(dir), '.locks', 'task-1.lock');
+    const before = await stat(lockFile);
+    expect(before.mode & LOCK_MODE_MASK).toBe(LOCK_FILE_MODE);
+
+    let releaseHolder = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseHolder = resolve;
+    });
+    let locked = () => {};
+    const holderLocked = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const holder = new LocalTaskStore({
+      rootDir: dir,
+      hooks: {
+        afterLock: async () => {
+          locked();
+          await gate;
+        },
+      },
+    });
+    const descriptorsBefore = openFileDescriptors();
+    const holding = holder.changeStatus('task-1', 'RESEARCHING');
+    await holderLocked;
+    for (let attempt = 0; attempt < CONTENDED_ATTEMPTS; attempt++) {
+      await expect(store.changeStatus('task-1', 'EVALUATING')).rejects.toBeInstanceOf(
+        LockTimeoutError,
+      );
+    }
+    releaseHolder();
+    await holding;
+    for (let i = 0; i < CONTENDED_ATTEMPTS; i++) {
+      await store.attachResult('task-1', result('task-1', `res-${i}`));
+    }
+
+    const after = await stat(lockFile);
+    expect({ ino: after.ino, dev: after.dev }).toEqual({ ino: before.ino, dev: before.dev });
+    expect(openFileDescriptors()).toBe(descriptorsBefore);
+  });
+
+  it('lock-free readers only ever see complete, valid snapshots while writers publish', async () => {
+    const store = new LocalTaskStore({ rootDir: dir, lockTimeoutMs: CHILD_WAIT_MS });
+    await store.createTask(task('task-1'));
+    const WRITES = 30;
+    let writing = true;
+    const writers = (async () => {
+      for (let i = 0; i < WRITES; i++) {
+        await store.attachResult('task-1', result('task-1', `res-${i}`));
+      }
+      writing = false;
+    })();
+
+    let previousCount = 0;
+    let reads = 0;
+    while (writing) {
+      const results = await store.getResults('task-1'); // throws on malformed JSON
+      const ids = results.map((entry) => entry.resultId);
+      expect(new Set(ids).size).toBe(ids.length);
+      expect(ids.length).toBeGreaterThanOrEqual(previousCount);
+      previousCount = ids.length;
+      reads++;
+    }
+    await writers;
+    expect(reads).toBeGreaterThan(0);
+    expect(await store.getResults('task-1')).toHaveLength(WRITES);
   });
 });

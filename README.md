@@ -9,7 +9,17 @@ See [docs/project-state.md](docs/project-state.md), [docs/architecture.md](docs/
 
 ## Quick start
 
-Requires Node 22.12.0 (`.nvmrc`), pnpm 9.9.0, Docker.
+Requires Node 22.12.0 (`.nvmrc`), pnpm 9.9.0, Docker, and **Linux** (Ubuntu host or Linux container).
+
+The local task store locks files with Linux `flock(2)` through the native `fs-ext` module, which node-gyp compiles during
+`pnpm install`. On Ubuntu install the build tools first (Python is used only by node-gyp; the platform code is TypeScript):
+
+```sh
+sudo apt-get install -y build-essential python3
+```
+
+macOS, Windows and network filesystems (NFS/SMB) are not supported by this local-file backend; it fails with a clear error
+instead of using a weaker lock. Multi-host or cloud task storage would be a separate integration.
 
 ```sh
 nvm use                      # or any Node 22.12.0
@@ -60,7 +70,8 @@ Task files are written to `.task-data/tasks/` (git-ignored). Execution history: 
 | Migrations            | `pnpm db:migrate`                                                                                    |
 | Worker                | `pnpm worker:start`                                                                                  |
 | CLI                   | `pnpm cli <start\|status\|approve\|reject\|approval-keygen\|executions\|reconcile\|migrate\|doctor>` |
+| Verify (no Docker)    | `pnpm verify` = format check, build, lint, typecheck (in that order; lint needs the built packages)  |
 | Format / lint / types | `pnpm format` / `pnpm lint` / `pnpm typecheck`                                                       |
-| Build / unit tests    | `pnpm build` / `pnpm test` (builds first; no infra needed)                                           |
+| Build / unit tests    | `pnpm build` / `pnpm test` (builds first; no infra needed; `verify` does not run tests)              |
 | Integration tests     | `pnpm test:integration` (needs `pnpm infra:up`; uses its own temp database)                          |
 | End-to-end smoke      | `pnpm smoke` (needs infra up + migrated)                                                             |
