@@ -5,6 +5,7 @@ import {
   condition,
   defineQuery,
   defineUpdate,
+  patched,
   proxyActivities,
   setHandler,
 } from '@temporalio/workflow';
@@ -22,6 +23,9 @@ import type { Activities } from '../activities.js';
 // Names must match DECISION_UPDATE / STATUS_QUERY in @platform/contracts.
 export const submitDecisionUpdate = defineUpdate<DecisionAck, [unknown]>('submitDecision');
 export const statusQuery = defineQuery<WorkflowStatus>('getStatus');
+
+/** Marks histories whose final decision comes from the canonical stored approval (F1 fix). */
+const CANONICAL_DECISION_PATCH = 'canonical-stored-decision';
 
 const ACTIVITY_TIMEOUT = '1 minute';
 const ACTIVITY_MAX_ATTEMPTS = 5;
@@ -166,24 +170,29 @@ export async function researchProposalWorkflow(
   const { envelope, actor, keyId, verifiedAt } = accepted;
   const { payload } = envelope;
 
-  await activities.recordDecision({
+  const recorded = await activities.recordDecision({
     runId: input.runId,
     taskId,
     gate: reviewGate,
     envelope,
     verifiedAt,
   });
-  const finalStatus: Status = payload.decision === 'approve' ? 'APPROVED' : 'REJECTED';
+  // Replay safety: histories recorded before this change returned `{ stored }` and derived the outcome from the
+  // submitted envelope. The patch marker keeps those histories replayable (patched() is false for them).
+  const final = patched(CANONICAL_DECISION_PATCH)
+    ? recorded
+    : {
+        decision: payload.decision,
+        source: 'human' as const,
+        actor,
+        keyId,
+        decisionId: payload.decisionId,
+        ...(payload.reason ? { reason: payload.reason } : {}),
+      };
+  const finalStatus: Status = final.decision === 'approve' ? 'APPROVED' : 'REJECTED';
   await activities.markStage({ runId: input.runId, taskId, stage: finalStatus });
   enterStage(finalStatus);
-  state.decision = {
-    decision: payload.decision,
-    source: 'human',
-    actor,
-    keyId,
-    decisionId: payload.decisionId,
-    ...(payload.reason ? { reason: payload.reason } : {}),
-  };
+  state.decision = final;
   await condition(allHandlersFinished);
   return state;
 }

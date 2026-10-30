@@ -24,8 +24,8 @@ Monorepo, contracts, local task store, mock executor, Postgres persistence + mig
 ## Code-quality scope
 
 Policy in `docs/code-quality.md` (linked from `AGENTS.md` and `README.md`), enforced by type-aware ESLint (no suppression
-comments), a typecheck covering tests/scripts/fixtures, Vitest coverage thresholds (80% lines / 80% branches, measured
-87.83% / 80.77%) and CI. A bounded readability pass split the CLI into commands, typed the executor contract, parsed database rows
+comments), a typecheck covering tests/scripts/fixtures, Vitest coverage thresholds (80% lines / 80% branches; measured
+87.83% / 80.77% at that milestone, see the corrected accounting under blockers for the current figures) and CI. A bounded readability pass split the CLI into commands, typed the executor contract, parsed database rows
 and converted the smoke script and child-process fixture to TypeScript. `loadPolicyContext` (`@platform/agents`) is the explicit path
 for giving the policy to future platform-spawned coding/review agents.
 
@@ -37,7 +37,7 @@ for giving the policy to future platform-spawned coding/review agents.
 - Exactly-once billing cannot be guaranteed by Postgres alone; external idempotency depends on the provider/runtime.
 - The local task store is Linux/local-filesystem only (`flock` via `fs-ext`; native build needs `build-essential` + `python3`); no NFS/SMB, no multi-host coordination. The lock is advisory.
 - `pnpm test:coverage`, `pnpm test:integration` and `pnpm smoke` need Docker infra; CI starts it from `infra/compose.yaml`. CI run #4 for `71dcfbc` completed successfully (observed through the GitHub API on 2026-10-30).
-- Workflow code and process entry points are not counted by coverage; the branch-coverage margin over the 80% floor is under one point.
+- **Coverage accounting (corrected 2026-10-30):** maintained workflow source (`apps/worker/src/workflows/index.ts`) and the process entry points (`apps/worker/src/main.ts`, `apps/cli/src/main.ts`) are **included** in the coverage denominator (`vitest.coverage.config.ts` excludes only test files, `*.d.ts`, `dist/` and `**/fixtures/**`). The workflow runs inside Temporal's sandbox from a bundle and is not instrumented by the V8 setup, so it is reported **uncovered** (0 of 62 lines, 0 of 15 branches); the two entry points are also reported uncovered (0 of 18 and 0 of 3 lines). Subprocess runs (the CLI and worker processes of `pnpm smoke`, the child processes of the lock tests) are not instrumented either. Their behavior is asserted by integration, smoke and replay tests, but those results do not raise the percentage. Current totals: 88.51% lines, 82.70% branches (floor 80/80 unchanged); an earlier phrase "not counted by coverage" meant "not instrumented", never "excluded".
 - Pre-change workflow histories are not replay-compatible (start new runs).
 
 ## Roadmap

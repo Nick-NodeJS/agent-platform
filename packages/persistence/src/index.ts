@@ -89,6 +89,10 @@ export interface ExecutionRecord {
 
 export class StaleExecutionError extends Error {}
 export class ExecutionInputMismatchError extends Error {}
+/** A different human decision (or decision id) already exists for the logical run, or the decision id was used elsewhere. */
+export class DecisionConflictError extends Error {}
+
+const UNIQUE_VIOLATION = '23505';
 
 // Database rows are an untrusted boundary for the compiler: parse them instead of asserting types.
 const executionRowSchema = z.object({
@@ -134,6 +138,23 @@ const runSummaryRowSchema = z.object({
   status: statusSchema,
 });
 
+const approvalRowSchema = z.object({
+  approval_id: z.string(),
+  run_id: z.string(),
+  task_id: z.string(),
+  decision: z.enum(['approve', 'reject']),
+  source: z.enum(['human', 'agent']),
+  actor: z.string(),
+  reason: z.string().nullable(),
+  created_at: z.date(),
+  decision_id: z.string().nullable(),
+  key_id: z.string().nullable(),
+  envelope_digest: z.string().nullable(),
+  gate_id: z.string().nullable(),
+});
+
+const runDecisionStateRowSchema = z.object({ status: statusSchema, has_approval: z.boolean() });
+
 const completedRowSchema = z.object({ run_id: z.string(), role: z.string(), attempts: z.number() });
 
 const costTotalRowSchema = z.object({ total: z.number() });
@@ -164,6 +185,57 @@ function toExecution(row: unknown): ExecutionRecord {
     uncertainReason: r.uncertain_reason,
   };
 }
+
+/** An approval as stored by this system: always carries the signer identity and the envelope digest. */
+export type StoredApproval = Approval & {
+  decisionId: string;
+  keyId: string;
+  envelopeDigest: string;
+};
+
+const storedApprovalRowSchema = approvalRowSchema.extend({
+  decision_id: z.string(),
+  key_id: z.string(),
+  envelope_digest: z.string(),
+});
+
+function approvalFromRow(source: z.infer<typeof approvalRowSchema>): StoredApproval {
+  const row = storedApprovalRowSchema.parse(source);
+  return {
+    approvalId: row.approval_id,
+    taskId: row.task_id,
+    runId: row.run_id,
+    decision: row.decision,
+    source: row.source,
+    actor: row.actor,
+    ...(row.reason ? { reason: row.reason } : {}),
+    decisionId: row.decision_id,
+    keyId: row.key_id,
+    envelopeDigest: row.envelope_digest,
+    createdAt: row.created_at.toISOString(),
+  };
+}
+
+/** Compares canonical fields (not timestamps). The envelope digest covers the signed payload and signature. */
+function isSameDecision(
+  row: z.infer<typeof approvalRowSchema>,
+  incoming: StoredApproval,
+  gateId: string,
+): boolean {
+  return (
+    row.decision === incoming.decision &&
+    row.source === incoming.source &&
+    row.actor === incoming.actor &&
+    row.decision_id === incoming.decisionId &&
+    row.key_id === incoming.keyId &&
+    row.envelope_digest === incoming.envelopeDigest &&
+    row.gate_id === gateId &&
+    row.reason === (incoming.reason ?? null)
+  );
+}
+
+const isUniqueViolation = (error: unknown): boolean =>
+  error instanceof Error && 'code' in error && error.code === UNIQUE_VIOLATION;
 
 /** Canonical records live here. All writes are idempotent or fenced so Activity retries are safe. */
 export class RunRepository {
@@ -237,33 +309,103 @@ export class RunRepository {
     return (r.rowCount ?? 0) > 0;
   }
 
-  /** Returns true only if this call stored the decision (first decision wins). */
-  async insertApproval(
-    a: Approval,
-    envelope?: ApprovalEnvelope,
-    gateId?: string,
-  ): Promise<boolean> {
-    const res = await this.db.query(
-      `INSERT INTO approvals (approval_id, run_id, task_id, decision, source, actor, reason, created_at,
-                              decision_id, key_id, envelope_digest, gate_id, envelope)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT DO NOTHING`,
-      [
-        a.approvalId,
-        a.runId,
-        a.taskId,
-        a.decision,
-        a.source,
-        a.actor,
-        a.reason ?? null,
-        a.createdAt,
-        a.decisionId ?? null,
-        a.keyId ?? null,
-        a.envelopeDigest ?? null,
-        gateId ?? null,
-        envelope ? JSON.stringify(envelope) : null,
-      ],
+  /**
+   * Whether a logical run already has an immutable outcome: a stored human decision or a terminal status.
+   * Postgres, not Temporal history, is the authority (histories expire; run ids are logical).
+   */
+  async getDecisionState(
+    runId: string,
+  ): Promise<{ status: Status; hasDecision: boolean; terminal: boolean } | undefined> {
+    const found = await this.db.query(
+      `SELECT r.status, EXISTS (SELECT 1 FROM approvals a WHERE a.run_id = r.run_id) AS has_approval
+         FROM runs r WHERE r.run_id = $1`,
+      [runId],
     );
-    return (res.rowCount ?? 0) > 0;
+    if (found.rows.length === 0) {
+      return undefined;
+    }
+    const row = runDecisionStateRowSchema.parse(found.rows[0]);
+    return {
+      status: row.status,
+      hasDecision: row.has_approval,
+      terminal: row.status === 'APPROVED' || row.status === 'REJECTED',
+    };
+  }
+
+  /**
+   * Stores the one human decision of a logical run and closes its gate in ONE transaction, serialized per run by a
+   * row lock. Returns the canonical stored decision: `created` is true only for the call that inserted it.
+   * An identical decision (same decision, decision id, signer, envelope digest, gate, reason) is an idempotent retry;
+   * anything else for that run, or a decision id already used by another run, is a DecisionConflictError.
+   */
+  async recordDecision(args: {
+    approval: StoredApproval;
+    envelope: ApprovalEnvelope;
+    gateId: string;
+  }): Promise<{ approval: StoredApproval; created: boolean }> {
+    const { approval, envelope, gateId } = args;
+    const client = await this.db.connect();
+    try {
+      await client.query('BEGIN');
+      const locked = await client.query('SELECT 1 FROM runs WHERE run_id = $1 FOR UPDATE', [
+        approval.runId,
+      ]);
+      if (locked.rows.length === 0) {
+        throw new Error(`run ${approval.runId} does not exist`);
+      }
+      const existing = await client.query('SELECT * FROM approvals WHERE run_id = $1', [
+        approval.runId,
+      ]);
+      let stored: StoredApproval;
+      let created = false;
+      if (existing.rows.length > 0) {
+        const row = approvalRowSchema.parse(existing.rows[0]);
+        if (!isSameDecision(row, approval, gateId)) {
+          throw new DecisionConflictError(
+            `run ${approval.runId} already has a different human decision (${row.decision}, decision id ${row.decision_id})`,
+          );
+        }
+        stored = approvalFromRow(row);
+      } else {
+        const inserted = await client.query(
+          `INSERT INTO approvals (approval_id, run_id, task_id, decision, source, actor, reason, created_at,
+                                  decision_id, key_id, envelope_digest, gate_id, envelope)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+          [
+            approval.approvalId,
+            approval.runId,
+            approval.taskId,
+            approval.decision,
+            approval.source,
+            approval.actor,
+            approval.reason ?? null,
+            approval.createdAt,
+            approval.decisionId,
+            approval.keyId,
+            approval.envelopeDigest,
+            gateId,
+            JSON.stringify(envelope),
+          ],
+        );
+        stored = approvalFromRow(approvalRowSchema.parse(inserted.rows[0]));
+        created = true;
+      }
+      await client.query("UPDATE review_gates SET status='decided' WHERE gate_id=$1", [gateId]);
+      await client.query('COMMIT');
+      return { approval: stored, created };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {
+        // The original failure is what matters; a failed rollback leaves the connection to be discarded.
+      });
+      if (isUniqueViolation(error)) {
+        throw new DecisionConflictError(
+          `decision id ${approval.decisionId} was already used by another run`,
+        );
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async insertEvent(e: ExecutionEvent): Promise<void> {
@@ -301,10 +443,6 @@ export class RunRepository {
     );
     const row = gateRowSchema.parse(r.rows[0]);
     return { gateId: row.gate_id, runId: row.run_id, artifacts: row.artifacts };
-  }
-
-  async closeGate(gateId: string): Promise<void> {
-    await this.db.query("UPDATE review_gates SET status='decided' WHERE gate_id=$1", [gateId]);
   }
 
   // ---- durable agent executions -------------------------------------------------------------

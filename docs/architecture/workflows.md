@@ -63,7 +63,8 @@ sequenceDiagram
   A-->>W: actor and keyId from trusted signers, or ApprovalRejected
   W-->>C: DecisionAck (or the Update fails with a reason)
   W->>A: recordDecision (verifies again)
-  A->>P: insert approval, close gate, then project to task file
+  A->>P: one transaction: store the run's one decision and close the gate
+  A-->>W: the canonical stored decision (also projected to the task file)
 ```
 
 Rules, with the code that implements them:
@@ -77,21 +78,45 @@ Rules, with the code that implements them:
   and replay (`decisionId` already stored). The signer's actor name comes from that file, not from the caller.
 - The first valid decision wins; the workflow re-checks after the asynchronous verification, so two concurrent decisions cannot
   both be accepted. Later decisions fail with "already accepted" or, after completion, are rejected by Temporal.
-- `recordDecision` verifies again before writing `source: human` to Postgres, then projects to the task file, then closes the gate.
+- `recordDecision` verifies again, then stores the decision **and** closes the gate in one Postgres transaction serialized per run by a
+  row lock (`RunRepository.recordDecision`). It returns the canonical stored approval; the Activity projects exactly that to the task
+  file, and the workflow derives its final status and `decision` from that returned value, not from the submitted envelope.
+- **What the Update acknowledgment means:** `DecisionAck` says the decision was verified and accepted _for processing_. It is not a
+  guarantee of durable completion: persistence happens afterwards in `recordDecision`. If that fails (for example `DecisionConflict`), the
+  workflow fails explicitly and the CLI prints an error; a run never ends successfully with a decision different from the stored one.
 - Trust limits are in [security](security.md).
+
+## One immutable decision per logical run ID
+
+The run ID is the logical identity of a request; Postgres rows are keyed by it, not by Temporal's per-execution run ID. **One run ID
+has exactly one human decision, and an approved or rejected run ID is never reused.** Three independent layers enforce this:
+
+| Layer                    | Behavior                                                                                                                                                                                                                                                                                                                                                               | Code                                                                                                              |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| 1. Temporal start policy | `pnpm cli start` sets `WorkflowIdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY` and `WorkflowIdConflictPolicy.FAIL`. A running or successfully completed run is **not** restarted: the CLI exits 1 with "inspect it with `status`, or choose a new `--run-id`". Failed, cancelled or terminated runs may restart                                                             | [`start.ts`](../../apps/cli/src/commands/start.ts)                                                                |
+| 2. Postgres guard        | `createTaskAndRun` and `openReviewGate` first call `assertRunNotDecided`. If Postgres holds a human decision or a terminal status for the run ID, the Activity fails non-retryably with `RunAlreadyDecided`: nothing is reset, reopened, re-executed or re-projected. This holds for direct Temporal starts that bypass the CLI and after Temporal history has expired | `assertRunNotDecided` in [`activities.ts`](../../apps/worker/src/activities.ts), `RunRepository.getDecisionState` |
+| 3. Canonical persistence | A different decision, envelope or decision ID for a decided run, or a decision ID used by another run, fails non-retryably with `DecisionConflict`. An identical decision is an idempotent retry                                                                                                                                                                       | `RunRepository.recordDecision`, `DecisionConflictError`                                                           |
+
+Consequences for operators:
+
+- **New evaluation = new run ID.** To re-evaluate something, start a new run with a new `--run-id`. There is no reversal, second approval or history deletion.
+- **Recovery with the same ID** is possible only while the run is **failed and undecided** (for example after an uncertain execution and a
+  `reconcile`): succeeded stages are reused and nothing is executed twice.
+- If a run's decision was stored but its workflow failed before the final status was projected, the run ID is already decided and cannot be restarted;
+  the stored decision stays authoritative (inspect it with `status`; this case is not expected in normal operation).
 
 ## Retry, reuse and uncertain execution
 
 Each agent stage has one row in `agent_executions` keyed by `runId:role:stage`. What happens when something goes wrong:
 
-| Situation                                                                                                                                                            | Result                                                                                                                       | Operator action                                     |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| Activity fails transiently (database down, projection error)                                                                                                         | Temporal **retries** (max 5 attempts, 1 s to 30 s backoff, 1-minute timeout per attempt)                                     | None                                                |
-| Stage already succeeded (retry, restarted run with the same run ID)                                                                                                  | **Reuse**: stored result is re-projected to the task file and cost ledger; the executor is **not** called                    | None                                                |
-| Another attempt holds the lease                                                                                                                                      | Retryable `ExecutionInProgress`                                                                                              | None                                                |
-| Result could not be stored after the executor returned (3 tries), executor error after it may have started, invalid executor output, or an invoked attempt abandoned | Execution becomes **`uncertain`**; the Activity fails with non-retryable `ExecutionOutcomeUncertain`; the **workflow fails** | See below                                           |
-| Executor says it never started (`ExecutorNotStartedError`)                                                                                                           | Execution returns to `pending` (attempt not counted); non-retryable `ExecutorNotStarted`; the workflow fails                 | Fix the cause, start the run again with the same ID |
-| Same stage, different input                                                                                                                                          | Non-retryable `ExecutionInputMismatch`                                                                                       | Use a new run                                       |
+| Situation                                                                                                                                                            | Result                                                                                                                       | Operator action                                                                           |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Activity fails transiently (database down, projection error)                                                                                                         | Temporal **retries** (max 5 attempts, 1 s to 30 s backoff, 1-minute timeout per attempt)                                     | None                                                                                      |
+| Stage already succeeded (Activity retry, or a failed undecided run restarted with the same run ID)                                                                   | **Reuse**: stored result is re-projected to the task file and cost ledger; the executor is **not** called                    | None                                                                                      |
+| Another attempt holds the lease                                                                                                                                      | Retryable `ExecutionInProgress`                                                                                              | None                                                                                      |
+| Result could not be stored after the executor returned (3 tries), executor error after it may have started, invalid executor output, or an invoked attempt abandoned | Execution becomes **`uncertain`**; the Activity fails with non-retryable `ExecutionOutcomeUncertain`; the **workflow fails** | See below                                                                                 |
+| Executor says it never started (`ExecutorNotStartedError`)                                                                                                           | Execution returns to `pending` (attempt not counted); non-retryable `ExecutorNotStarted`; the workflow fails                 | Fix the cause, start the run again with the same ID (allowed: it failed and is undecided) |
+| Same stage, different input                                                                                                                                          | Non-retryable `ExecutionInputMismatch`                                                                                       | Use a new run                                                                             |
 
 Uncertain execution, step by step:
 
@@ -99,7 +124,7 @@ Uncertain execution, step by step:
 2. Decide out of band whether an external run happened or may be repeated. Postgres cannot know; exactly-once billing is not guaranteed.
 3. `pnpm cli reconcile <runId> <researcher|business-owner> --confirm-no-external-run` resets that execution to `pending`
    (previous attempts stay counted).
-4. `pnpm cli start --goal "..." --run-id <same runId>`: a failed workflow ID can be reused; existing task, results and
+4. `pnpm cli start --goal "..." --run-id <same runId>`: only a failed, undecided run ID can be reused (see above); existing task, results and
    succeeded executions are reused, only the reset stage runs again.
 
 The executor receives a stable idempotency key (`runId:role:stage:` plus the first 16 hex characters of the input digest). It prevents duplicate external work only if the provider or runtime honors it; Postgres alone cannot guarantee exactly-once billing. An `uncertain` execution is never re-run automatically. This path is covered by integration tests with a counting executor and
@@ -144,9 +169,14 @@ Results are fictional placeholders (`fictionalExample: true`). The Temporal UI l
 - **Worker restart:** safe. The workflow resumes from Temporal history; this is exercised by the smoke script and by integration
   tests (a run stays queryable and a pending decision is processed after the worker returns).
 - **Workflow code changes:** Temporal replays history against the current code, so a change that alters the order of workflow
-  commands breaks open workflows. The code uses no `patched()` or worker versioning. The unsigned-Signal approval was replaced by the
-  signed Update, so runs started before that change are **not** replay-compatible; the policy for this local mock-only project is to start
-  new runs (new run IDs) and never delete old histories.
-- No replay test exists. Compatibility of histories created by earlier commits with the current workflow code is **not verified**.
+  commands breaks open workflows, and also Queries on closed ones (`pnpm cli status` replays the history). The unsigned-Signal approval was
+  replaced by the signed Update, so runs started before that change are **not** replay-compatible; new runs (new run IDs) are required and
+  old histories are never deleted.
+- **The canonical-decision change** (final status taken from the stored approval) is guarded with `patched('canonical-stored-decision')`
+  in `workflows/index.ts`, so histories recorded before it, whose `recordDecision` returned `{ stored }`, still replay. Evidence: replaying
+  all 125 completed `researchProposalWorkflow` histories in the local dev server against the new workflow code succeeded for 118; the 7 failures are
+  exactly the runs started before the signed-Update change (the first run and the first smoke runs, 2026-10-30 10:44-11:08). This
+  was a one-off local check, not a CI test. [`run-identity.integration.test.ts`](../../tests/integration/run-identity.integration.test.ts)
+  adds a permanent replay test of a freshly recorded history. Cross-commit replay of every future change is not automated.
 - Activity code (executor, database, files) can change without replay concerns, but must keep Activity names and argument shapes
-  that open workflows already scheduled.
+  that open workflows already scheduled. The `patched()` marker can be removed only after no history without it can still be replayed.

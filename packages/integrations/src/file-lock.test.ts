@@ -15,12 +15,18 @@ describe('withExclusiveLock', () => {
 
   it('serializes independent acquisitions in one process and passes the action result through', async () => {
     const order: string[] = [];
+    let slowHoldsLock = () => {};
+    const slowIsInside = new Promise<void>((resolve) => {
+      slowHoldsLock = resolve;
+    });
     const slow = withExclusiveLock(lockPath, { timeoutMs: 2000 }, async () => {
       order.push('slow-start');
+      slowHoldsLock();
       await new Promise((resolve) => setTimeout(resolve, 150));
       order.push('slow-end');
       return 'slow';
     });
+    await slowIsInside; // readiness barrier: the second contender starts only once the first holds the lock
     const quick = withExclusiveLock(lockPath, { timeoutMs: 2000 }, async () => {
       order.push('quick');
       return 'quick';

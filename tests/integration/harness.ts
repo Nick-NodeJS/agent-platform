@@ -6,7 +6,13 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { z } from 'zod';
-import { Client, Connection, WorkflowUpdateFailedError } from '@temporalio/client';
+import {
+  Client,
+  Connection,
+  WorkflowIdConflictPolicy,
+  WorkflowIdReusePolicy,
+  WorkflowUpdateFailedError,
+} from '@temporalio/client';
 import {
   NativeConnection,
   Worker,
@@ -30,6 +36,7 @@ import {
   type ApprovalPayload,
   type WorkflowStatus,
   type ResourceConstraints,
+  type ReviewGate,
 } from '@platform/contracts';
 import {
   generateSigner,
@@ -208,13 +215,26 @@ export const constraints: ResourceConstraints = {
 
 export const newRunId = (prefix = 'it') => `${prefix}-${randomUUID().slice(0, 10)}`;
 
+/** Starts a run exactly like the CLI does: only a failed (undecided) execution of the same id may be restarted. */
 export async function startRun(env: Env, runId = newRunId()) {
   await env.client.workflow.start(WORKFLOW_NAME, {
     workflowId: runId,
     taskQueue: env.taskQueue,
     args: [{ runId, goal: 'integration test goal', constraints }],
+    workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+    workflowIdConflictPolicy: WorkflowIdConflictPolicy.FAIL,
   });
   return runId;
+}
+
+/** Starts a new execution with an explicitly permissive reuse policy, as a caller bypassing the CLI could. */
+export function startRunBypassingCli(env: Env, runId: string) {
+  return env.client.workflow.start(WORKFLOW_NAME, {
+    workflowId: runId,
+    taskQueue: env.taskQueue,
+    args: [{ runId, goal: 'bypass attempt', constraints }],
+    workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE,
+  });
 }
 
 const POLL_INTERVAL_MS = 150;
@@ -281,13 +301,21 @@ export function sign(
   if (!status.gate) {
     throw new Error('cannot sign: the run has no open review gate');
   }
+  return signForGate(status.gate, patch, signer);
+}
+
+export function signForGate(
+  gate: ReviewGate,
+  patch: Partial<ApprovalPayload> = {},
+  signer: SignerFile,
+) {
   const issuedAt = Date.now();
   const payload: ApprovalPayload = {
     version: 1,
     decisionId: `dec-${randomUUID().slice(0, 12)}`,
-    runId: status.runId,
-    gateId: status.gate.gateId,
-    artifacts: status.gate.artifacts,
+    runId: gate.runId,
+    gateId: gate.gateId,
+    artifacts: gate.artifacts,
     decision: 'approve',
     keyId: signer.keyId,
     actor: signer.actor,
@@ -356,12 +384,13 @@ const approvalRowSchema = z.object({
   source: z.string(),
   actor: z.string(),
   key_id: z.string(),
+  decision_id: z.string(),
 });
 
 /** Persisted approval rows of a run, as the Postgres source of truth sees them. */
 export async function approvalRows(env: Env, runId: string) {
   const found = await env.db.query(
-    'SELECT decision, source, actor, key_id FROM approvals WHERE run_id=$1',
+    'SELECT decision, source, actor, key_id, decision_id FROM approvals WHERE run_id=$1',
     [runId],
   );
   return found.rows.map((row) => approvalRowSchema.parse(row));

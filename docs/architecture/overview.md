@@ -17,21 +17,22 @@ implemented.
 
 ## Implemented and planned
 
-| Capability                                                                 | Status                          | Where                                                                          |
-| -------------------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------------------------------ |
-| CLI: start, status, approve, reject, keygen, executions, reconcile, doctor | Implemented                     | [`apps/cli`](../../apps/cli/src/cli.ts)                                        |
-| Temporal workflow `researchProposalWorkflow` with Activities               | Implemented (mock agents)       | [`apps/worker`](../../apps/worker/src/workflows/index.ts)                      |
-| Mock researcher and business-owner executor                                | Implemented (mock)              | [`executors.ts`](../../packages/integrations/src/executors.ts)                 |
-| Signed human approval gate (Temporal Update, Ed25519 envelope)             | Implemented                     | [security](security.md), [workflows](workflows.md)                             |
-| Durable execution records, leases, uncertain-outcome handling              | Implemented                     | [`agent-stage.ts`](../../apps/worker/src/agent-stage.ts)                       |
-| PostgreSQL business records, migrations                                    | Implemented                     | [`packages/persistence`](../../packages/persistence/src/index.ts)              |
-| Local task files (JSON + Markdown) with Linux `flock`                      | Implemented                     | [`local-task-store.ts`](../../packages/integrations/src/local-task-store.ts)   |
-| CI, 80% line/branch coverage floor                                         | Implemented                     | [`ci.yml`](../../.github/workflows/ci.yml), [code quality](../code-quality.md) |
-| Role instructions and model profiles                                       | Placeholders only, not wired    | [`packages/agents`](../../packages/agents/src/index.ts)                        |
-| Real researcher and BO via direct model/search APIs                        | **Planned** (roadmap steps 2-4) | [ADR 5](../decisions/0005-direct-api-research-first.md)                        |
-| Execution/cost visibility, budget enforcement, restricted tools            | **Planned** (step 3)            | [security](security.md)                                                        |
-| Product repository, PM/architect roles, OpenHands, deployment, QA          | **Planned** (steps 6-9)         | [project state](../project-state.md)                                           |
-| Parallel execution, Jira task adapter, cloud hosting                       | **Planned** (steps 10-12)       | [project state](../project-state.md)                                           |
+| Capability                                                                                                                                 | Status                          | Where                                                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CLI: start, status, approve, reject, keygen, executions, reconcile, doctor                                                                 | Implemented                     | [`apps/cli`](../../apps/cli/src/cli.ts)                                                                                                                        |
+| Temporal workflow `researchProposalWorkflow` with Activities                                                                               | Implemented (mock agents)       | [`apps/worker`](../../apps/worker/src/workflows/index.ts)                                                                                                      |
+| Mock researcher and business-owner executor                                                                                                | Implemented (mock)              | [`executors.ts`](../../packages/integrations/src/executors.ts)                                                                                                 |
+| Signed human approval gate (Temporal Update, Ed25519 envelope)                                                                             | Implemented                     | [security](security.md), [workflows](workflows.md)                                                                                                             |
+| Durable execution records, leases, uncertain-outcome handling                                                                              | Implemented                     | [`agent-stage.ts`](../../apps/worker/src/agent-stage.ts)                                                                                                       |
+| PostgreSQL business records, migrations                                                                                                    | Implemented                     | [`packages/persistence`](../../packages/persistence/src/index.ts)                                                                                              |
+| Local task files (JSON + Markdown) with Linux `flock`                                                                                      | Implemented                     | [`local-task-store.ts`](../../packages/integrations/src/local-task-store.ts)                                                                                   |
+| CI, 80% line/branch coverage floor                                                                                                         | Implemented                     | [`ci.yml`](../../.github/workflows/ci.yml), [code quality](../code-quality.md)                                                                                 |
+| Role instructions and model profiles                                                                                                       | Placeholders only, not wired    | [`packages/agents`](../../packages/agents/src/index.ts)                                                                                                        |
+| Real researcher and BO via direct model/search APIs                                                                                        | **Planned** (roadmap steps 2-4) | [ADR 5](../decisions/0005-direct-api-research-first.md)                                                                                                        |
+| Persisted execution records, attempt accounting, execution events, cost entries; CLI `status` and `executions` output (mock usage costs 0) | Implemented                     | [`agent_executions`, `cost_entries`, `execution_events`](../../packages/persistence/migrations/), [`executions.ts`](../../apps/cli/src/commands/executions.ts) |
+| Real provider usage metering and reconciliation, enforced runtime spending limits, tool restrictions for real agents, richer monitoring/UI | **Planned** (step 3)            | [security](security.md)                                                                                                                                        |
+| Product repository, PM/architect roles, OpenHands, deployment, QA                                                                          | **Planned** (steps 6-9)         | [project state](../project-state.md)                                                                                                                           |
+| Parallel execution, Jira task adapter, cloud hosting                                                                                       | **Planned** (steps 10-12)       | [project state](../project-state.md)                                                                                                                           |
 
 ## Current runtime components
 
@@ -82,7 +83,7 @@ flowchart TD
   worker["Worker process (existing)"] -->|"planned: typed execution contract"| exec["Planned: provider executor for researcher and BO"]
   exec -->|"planned: HTTPS"| model["Model provider API (external)"]
   exec -->|"planned: HTTPS"| search["Search API (external)"]
-  exec -->|"planned: SQL"| log["Execution and cost records in PostgreSQL"]
+  exec -->|"planned: SQL"| log["Usage metering records in PostgreSQL (extends today's tables)"]
   worker -->|"existing: signed gate"| gate["Human approval (existing)"]
 ```
 

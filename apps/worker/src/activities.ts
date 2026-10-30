@@ -9,8 +9,10 @@ import {
   type ApprovalEnvelope,
   type ArtifactRef,
   type ResourceConstraints,
+  type Result,
   type ReviewGate,
   type Status,
+  type WorkflowStatus,
   type TaskStore,
 } from '@platform/contracts';
 import {
@@ -20,7 +22,7 @@ import {
   sha256Hex,
   verifyApproval,
 } from '@platform/contracts/node';
-import type { RunRepository } from '@platform/persistence';
+import { DecisionConflictError, type RunRepository } from '@platform/persistence';
 import { runAgentStage } from './agent-stage.js';
 
 export interface ActivityDeps {
@@ -33,6 +35,12 @@ export interface ActivityDeps {
   persistAttempts?: number;
   now?: () => Date;
 }
+
+export const RUN_ALREADY_DECIDED = 'RunAlreadyDecided';
+export const DECISION_CONFLICT = 'DecisionConflict';
+
+/** The human decision exactly as stored in Postgres; the workflow derives its final status from this. */
+export type CanonicalDecision = NonNullable<WorkflowStatus['decision']>;
 
 const RESEARCH_STAGE = 'research';
 const EVALUATION_STAGE = 'evaluation';
@@ -61,18 +69,38 @@ export function createActivities(deps: ActivityDeps) {
       createdAt: now().toISOString(),
     });
 
-  /** Gate artifacts always come from canonical stored results (Postgres), never from caller input. */
-  const currentArtifacts = async (runId: string): Promise<ArtifactRef[]> => {
-    const refs: ArtifactRef[] = [];
+  /**
+   * One logical run id has one immutable human decision. Postgres (not Temporal history) is the authority, so this
+   * also protects ids whose histories expired or that are started directly, bypassing the CLI.
+   */
+  const assertRunNotDecided = async (runId: string): Promise<void> => {
+    const state = await repo.getDecisionState(runId);
+    if (state && (state.hasDecision || state.terminal)) {
+      throw ApplicationFailure.nonRetryable(
+        `run ${runId} is already decided (${state.status}); use a new run id for a new evaluation`,
+        RUN_ALREADY_DECIDED,
+      );
+    }
+  };
+
+  /** The two results a gate covers, always read from canonical storage (Postgres), never from caller input. */
+  const storedGateResults = async (runId: string): Promise<Result[]> => {
+    const results: Result[] = [];
     for (const id of [researchResultId(runId), evaluationResultId(runId)]) {
-      const r = await repo.getResult(id);
-      if (!r) {
+      const stored = await repo.getResult(id);
+      if (!stored) {
         throw ApplicationFailure.nonRetryable(`result ${id} is not saved yet`, 'GateNotReady');
       }
-      refs.push({ resultId: id, digest: r.digest ?? digestPayload(r.payload) });
+      results.push(stored);
     }
-    return refs;
+    return results;
   };
+
+  const artifactRefs = (results: Result[]): ArtifactRef[] =>
+    results.map((result) => ({
+      resultId: result.resultId,
+      digest: result.digest ?? digestPayload(result.payload),
+    }));
 
   /**
    * Verifies a signed decision against the CURRENT canonical artifacts. Identity comes from the trusted-signers
@@ -96,7 +124,7 @@ export function createActivities(deps: ActivityDeps) {
       return reject('malformed approval envelope');
     }
 
-    const current = await currentArtifacts(gate.runId);
+    const current = artifactRefs(await storedGateResults(gate.runId));
     if (!sameArtifacts(current, gate.artifacts)) {
       return reject('gate artifacts are no longer current');
     }
@@ -135,6 +163,7 @@ export function createActivities(deps: ActivityDeps) {
       constraints: ResourceConstraints;
     }): Promise<{ taskId: string; taskLocation: string }> {
       const { runId, goal, constraints } = args;
+      await assertRunNotDecided(runId);
       const taskId = `task-${runId}`;
       const ts = now().toISOString();
       await repo.insertRun({
@@ -221,12 +250,11 @@ export function createActivities(deps: ActivityDeps) {
      * to Postgres and the task store first. The workflow exposes the gate only after this Activity returns.
      */
     async openReviewGate(args: { runId: string; taskId: string }): Promise<ReviewGate> {
-      const artifacts = await currentArtifacts(args.runId);
-      for (const id of artifacts.map((a) => a.resultId)) {
-        const r = await repo.getResult(id);
-        if (r) {
-          await tasks.attachResult(args.taskId, r);
-        }
+      await assertRunNotDecided(args.runId);
+      const results = await storedGateResults(args.runId);
+      const artifacts = artifactRefs(results);
+      for (const result of results) {
+        await tasks.attachResult(args.taskId, result);
       }
       await repo.updateStatus(args.runId, 'WAITING_FOR_HUMAN_APPROVAL');
       await tasks.changeStatus(args.taskId, 'WAITING_FOR_HUMAN_APPROVAL');
@@ -244,50 +272,73 @@ export function createActivities(deps: ActivityDeps) {
      * Returns identity derived from the trusted signer configuration (never from caller claims).
      */
     async verifyApproval(args: {
-      envelope: ApprovalEnvelope;
+      // Activity arguments cross a process boundary; the envelope is parsed again here.
+      envelope: unknown;
       gate: ReviewGate;
     }): Promise<{ actor: string; keyId: string; envelopeDigest: string; verifiedAt: string }> {
       return verifyAgainstCurrent(args.envelope, args.gate, now());
     },
 
+    /**
+     * Persists the run's one human decision (decision + gate closure in one transaction) and projects the CANONICAL stored
+     * approval. An identical retry is idempotent; a different decision for the run is a non-retryable DecisionConflict.
+     */
     async recordDecision(args: {
       runId: string;
       taskId: string;
       gate: ReviewGate;
       envelope: ApprovalEnvelope;
       verifiedAt: string;
-    }): Promise<{ stored: boolean }> {
+    }): Promise<CanonicalDecision> {
       // Defense in depth: only a fully verified envelope can be persisted as a human decision.
-      const v = await verifyAgainstCurrent(
+      const verified = await verifyAgainstCurrent(
         args.envelope,
         args.gate,
         new Date(args.verifiedAt),
         true,
       );
-      const p = args.envelope.payload;
-      const approval = {
-        approvalId: `${args.runId}-final-decision`,
-        taskId: args.taskId,
-        runId: args.runId,
-        decision: p.decision,
-        source: 'human' as const,
-        actor: v.actor,
-        ...(p.reason ? { reason: p.reason } : {}),
-        decisionId: p.decisionId,
-        keyId: v.keyId,
-        envelopeDigest: v.envelopeDigest,
-        createdAt: now().toISOString(),
-      };
-      const stored = await repo.insertApproval(approval, args.envelope, args.gate.gateId);
+      const { payload } = args.envelope;
+      let stored;
+      try {
+        stored = await repo.recordDecision({
+          approval: {
+            approvalId: `${args.runId}-final-decision`,
+            taskId: args.taskId,
+            runId: args.runId,
+            decision: payload.decision,
+            source: 'human',
+            actor: verified.actor,
+            ...(payload.reason ? { reason: payload.reason } : {}),
+            decisionId: payload.decisionId,
+            keyId: verified.keyId,
+            envelopeDigest: verified.envelopeDigest,
+            createdAt: now().toISOString(),
+          },
+          envelope: args.envelope,
+          gateId: args.gate.gateId,
+        });
+      } catch (error) {
+        if (error instanceof DecisionConflictError) {
+          throw ApplicationFailure.nonRetryable(error.message, DECISION_CONFLICT);
+        }
+        throw error;
+      }
+      const { approval } = stored;
       await tasks.recordApproval(args.taskId, approval);
-      await repo.closeGate(args.gate.gateId);
       await event(args.runId, 'decision', 'approval.recorded', {
-        decision: p.decision,
+        decision: approval.decision,
         source: 'human',
-        decisionId: p.decisionId,
-        keyId: v.keyId,
+        decisionId: approval.decisionId,
+        keyId: approval.keyId,
       });
-      return { stored };
+      return {
+        decision: approval.decision,
+        source: 'human',
+        actor: approval.actor,
+        keyId: approval.keyId,
+        decisionId: approval.decisionId,
+        ...(approval.reason ? { reason: approval.reason } : {}),
+      };
     },
   };
 }

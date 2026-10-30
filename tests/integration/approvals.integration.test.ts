@@ -173,7 +173,7 @@ describe('review gate and signed human approval (live Temporal + Postgres)', () 
       });
     }
     expect((await query(env, runA)).status).toBe(WAITING);
-    expect(await approvalRows(env, runA)).toEqual([]);
+    expect(await approvalRows(env, runA)).toHaveLength(0);
 
     // A correctly signed decision for the current gate works; identity comes from the trusted config.
     const good = sign(env, statusA, { decision: 'reject', reason: 'not now' });
@@ -198,10 +198,10 @@ describe('review gate and signed human approval (live Temporal + Postgres)', () 
 
     await submit(env, runB, sign(env, statusB));
     await finish(runB);
-    expect(await approvalRows(env, runA)).toEqual([
+    expect(await approvalRows(env, runA)).toMatchObject([
       { decision: 'reject', source: 'human', actor: 'it-human', key_id: 'it-key' },
     ]);
-    expect(await approvalRows(env, runB)).toEqual([
+    expect(await approvalRows(env, runB)).toMatchObject([
       { decision: 'approve', source: 'human', actor: 'it-human', key_id: 'it-key' },
     ]);
   });
@@ -242,7 +242,7 @@ describe('review gate and signed human approval (live Temporal + Postgres)', () 
     const winner = accepted[0]?.decision;
     await finish(runId);
     expect((await query(env, runId)).status).toBe(winner === 'approve' ? 'APPROVED' : 'REJECTED');
-    expect(await approvalRows(env, runId)).toEqual([
+    expect(await approvalRows(env, runId)).toMatchObject([
       { decision: winner, source: 'human', actor: 'it-human', key_id: 'it-key' },
     ]);
 
@@ -279,7 +279,7 @@ describe('review gate and signed human approval (live Temporal + Postgres)', () 
     worker = await startWorker(env, { trustedSignersFile: path.join(env.keyDir, 'missing.json') });
     await expectRejected(submit(env, runId, sign(env, status)), /unreadable or invalid/);
     expect((await query(env, runId)).status).toBe(WAITING);
-    expect(await approvalRows(env, runId)).toEqual([]);
+    expect(await approvalRows(env, runId)).toHaveLength(0);
 
     await worker.stop();
     worker = await startWorker(env);

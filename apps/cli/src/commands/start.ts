@@ -1,5 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import {
+  WorkflowExecutionAlreadyStartedError,
+  WorkflowIdConflictPolicy,
+  WorkflowIdReusePolicy,
+} from '@temporalio/client';
+import {
   WORKFLOW_NAME,
   idSchema,
   resourceConstraintsSchema,
@@ -32,7 +37,19 @@ export async function startCommand(ctx: CliContext, { flags }: ParsedArgs): Prom
       workflowId: runId,
       taskQueue: config.TASK_QUEUE,
       args: [input],
+      // One logical run id has one immutable human decision: only a FAILED (undecided) execution may be restarted with
+      // the same id. Running and completed ones are refused; the conflict policy never terminates or reuses them.
+      workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+      workflowIdConflictPolicy: WorkflowIdConflictPolicy.FAIL,
     });
+  } catch (error) {
+    if (error instanceof WorkflowExecutionAlreadyStartedError) {
+      throw new CliError(
+        `run ${runId} already exists and is running or completed; it was not restarted. ` +
+          `Inspect it with "pnpm cli status ${runId}", or choose a new --run-id for a new request.`,
+      );
+    }
+    throw error;
   } finally {
     await connection.close();
   }

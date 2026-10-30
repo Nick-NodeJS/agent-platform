@@ -119,10 +119,10 @@ application/library source, measured with the V8 provider by `pnpm test:coverage
   `pnpm infra:up`, using a temporary database that the tests drop). Source files that are never loaded are still counted in the denominator.
 - **Excluded from the measurement:** test files, `*.d.ts`, build output (`dist/`), and `**/fixtures/**` (child-process
   fixture entry points, which run in separate processes). Tooling configuration (ESLint, Vitest, tsconfig) is not under `src/`.
-- **Not instrumented, so not counted as measured coverage:** workflow code (it runs inside Temporal's isolated
-  sandbox from a webpack bundle; it stays in the denominator and is exercised behaviorally by the integration tests),
-  the separate CLI/worker processes started by `pnpm smoke`, and the child processes spawned by the cross-process
-  `LocalTaskStore` tests. Their behavior is asserted by tests, but the percentage does not include it.
+- **Included in the denominator but not instrumented, so reported as uncovered:** workflow code (it runs inside Temporal's
+  isolated sandbox from a webpack bundle) and the `main.ts` process entry points. **Not instrumented at all:** the separate
+  CLI/worker processes started by `pnpm smoke` and the child processes spawned by the cross-process `LocalTaskStore` tests. Their
+  behavior is asserted by integration, smoke and replay tests, but those results do not raise the percentage.
 - Reach the floor with useful tests. Do not hide difficult files, lower thresholds, add blanket ignores, or pad
   assertions. If a material blocker prevents the target, report it and leave the check failing rather than weakening it.
 - Coverage is evidence of execution, not correctness. Approval, budget, idempotency and concurrency requirements need

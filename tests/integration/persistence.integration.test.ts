@@ -4,9 +4,22 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { Approval, Result, Run } from '@platform/contracts';
-import { ExecutionInputMismatchError, migrate } from '@platform/persistence';
-import { constraints, createEnv, newRunId, type Env } from './harness.js';
+import type { Result, Run } from '@platform/contracts';
+import { digestPayload } from '@platform/contracts/node';
+import {
+  DecisionConflictError,
+  ExecutionInputMismatchError,
+  migrate,
+  type StoredApproval,
+} from '@platform/persistence';
+import {
+  approvalRows,
+  constraints,
+  createEnv,
+  newRunId,
+  signForGate,
+  type Env,
+} from './harness.js';
 
 const DIGEST = 'd'.repeat(64);
 const LEASE_MS = 5000;
@@ -47,18 +60,6 @@ describe('PostgreSQL repository and migrations (temporary database)', () => {
     payload: { a: 1 },
     digest: DIGEST,
     createdAt: timestamp(),
-  });
-
-  const approvalFor = (run: Run, overrides: Partial<Approval> = {}): Approval => ({
-    approvalId: `${run.runId}-final-decision`,
-    taskId: run.taskId,
-    runId: run.runId,
-    decision: 'approve',
-    source: 'human',
-    actor: 'tester',
-    decisionId: `dec-${randomUUID().slice(0, 8)}`,
-    createdAt: timestamp(),
-    ...overrides,
   });
 
   it('applies migrations once, in order, and is a no-op the second time', async () => {
@@ -143,23 +144,193 @@ describe('PostgreSQL repository and migrations (temporary database)', () => {
     expect(await env.repo.getRunSummary(newRunId('unknown'))).toBeUndefined();
   });
 
-  it('stores exactly one decision per run (first wins) and detects reused decision ids', async () => {
-    const run = await insertRun();
-    const first = approvalFor(run, { decision: 'approve', decisionId: 'dec-first' });
-    expect(await env.repo.insertApproval(first)).toBe(true);
-    expect(
-      await env.repo.insertApproval(
-        approvalFor(run, { decision: 'reject', decisionId: 'dec-second' }),
-      ),
-    ).toBe(false);
+  /** A gate for the run and a correctly shaped decision (signed envelope plus the approval row derived from it). */
+  const decisionFor = async (
+    run: Run,
+    decision: 'approve' | 'reject',
+    decisionId = `dec-${randomUUID().slice(0, 10)}`,
+  ) => {
+    const gateId = `gate-${run.runId}`.slice(0, 60);
+    const gate = await env.repo.openGate({
+      gateId,
+      runId: run.runId,
+      artifacts: [{ resultId: `${run.runId}-r`, digest: DIGEST }],
+    });
+    const envelope = signForGate(gate, { decision, decisionId }, env.signer);
+    const approval: StoredApproval = {
+      approvalId: `${run.runId}-final-decision`,
+      taskId: run.taskId,
+      runId: run.runId,
+      decision,
+      source: 'human',
+      actor: env.signer.actor,
+      decisionId,
+      keyId: env.signer.keyId,
+      envelopeDigest: digestPayload(envelope),
+      createdAt: timestamp(),
+    };
+    return { gate, envelope, approval, args: { approval, envelope, gateId: gate.gateId } };
+  };
 
+  const storedApprovals = (runId: string) => approvalRows(env, runId);
+
+  it('records one decision per run in a transaction that also closes the gate; identical retries are idempotent', async () => {
+    const run = await insertRun();
+    const first = await decisionFor(run, 'approve', 'dec-first');
+
+    const created = await env.repo.recordDecision(first.args);
+    expect(created.created).toBe(true);
+    expect(created.approval).toMatchObject({
+      decision: 'approve',
+      decisionId: 'dec-first',
+      actor: 'it-human',
+    });
+    const gate = await env.db.query('SELECT status FROM review_gates WHERE gate_id=$1', [
+      first.gate.gateId,
+    ]);
+    expect(gate.rows).toEqual([{ status: 'decided' }]);
+
+    const retried = await env.repo.recordDecision({
+      ...first.args,
+      approval: { ...first.approval, createdAt: timestamp() },
+    });
+    expect(retried.created).toBe(false);
+    expect(retried.approval).toEqual(created.approval);
+    expect(await storedApprovals(run.runId)).toMatchObject([
+      { decision: 'approve', decision_id: 'dec-first', key_id: 'it-key' },
+    ]);
     expect(await env.repo.hasDecisionId('dec-first')).toBe(true);
-    expect(await env.repo.hasDecisionId('dec-second')).toBe(false);
-    const rows = await env.db.query('SELECT decision FROM approvals WHERE run_id=$1', [run.runId]);
-    expect(rows.rows).toEqual([{ decision: 'approve' }]);
+    expect(await env.repo.hasDecisionId('dec-unused')).toBe(false);
   });
 
-  it('opening a gate twice returns the first gate unchanged; closing marks it decided', async () => {
+  it('refuses a different decision, envelope or decision id for a decided run, and a decision id used by another run', async () => {
+    const run = await insertRun();
+    const first = await decisionFor(run, 'approve', 'dec-a');
+    await env.repo.recordDecision(first.args);
+
+    const opposite = await decisionFor(run, 'reject', 'dec-b');
+    await expect(env.repo.recordDecision(opposite.args)).rejects.toBeInstanceOf(
+      DecisionConflictError,
+    );
+    const sameDecisionNewId = await decisionFor(run, 'approve', 'dec-c');
+    await expect(env.repo.recordDecision(sameDecisionNewId.args)).rejects.toBeInstanceOf(
+      DecisionConflictError,
+    );
+    const differentEnvelope = {
+      ...first.args,
+      approval: { ...first.approval, envelopeDigest: 'f'.repeat(64) },
+    };
+    await expect(env.repo.recordDecision(differentEnvelope)).rejects.toBeInstanceOf(
+      DecisionConflictError,
+    );
+    expect(await storedApprovals(run.runId)).toMatchObject([
+      { decision: 'approve', decision_id: 'dec-a', key_id: 'it-key' },
+    ]);
+
+    const other = await insertRun();
+    const replay = await decisionFor(other, 'approve', 'dec-a');
+    await expect(env.repo.recordDecision(replay.args)).rejects.toThrow(
+      /already used by another run/,
+    );
+    expect(await storedApprovals(other.runId)).toEqual([]);
+  });
+
+  it('concurrent attempts serialize on the run row: exactly one decision is created, the rest match it or conflict', async () => {
+    const run = await insertRun();
+    const identical = await decisionFor(run, 'approve', 'dec-same');
+    const rivals = await Promise.all(
+      (['reject', 'approve', 'reject'] as const).map((decision, i) =>
+        decisionFor(run, decision, `dec-rival-${i}`),
+      ),
+    );
+    const attempts = [
+      ...Array.from({ length: 4 }, () => identical.args),
+      ...rivals.map((rival) => rival.args),
+    ];
+
+    const outcomes = await Promise.allSettled(
+      attempts.map((args) => env.repo.recordDecision(args)),
+    );
+
+    const stored = await storedApprovals(run.runId);
+    expect(stored).toHaveLength(1);
+    const winner = stored[0]?.decision_id;
+    const fulfilled = outcomes.flatMap((outcome) =>
+      outcome.status === 'fulfilled' ? [outcome.value] : [],
+    );
+    expect(fulfilled.filter((outcome) => outcome.created)).toHaveLength(1);
+    expect(new Set(fulfilled.map((outcome) => outcome.approval.decisionId))).toEqual(
+      new Set([winner]),
+    );
+    for (const outcome of outcomes) {
+      if (outcome.status === 'rejected') {
+        expect(outcome.reason).toBeInstanceOf(DecisionConflictError);
+      }
+    }
+  });
+
+  it('an approval stored before signer identity was recorded still protects the run id and is never overwritten', async () => {
+    const run = await insertRun();
+    await env.db.query(
+      `INSERT INTO approvals (approval_id, run_id, task_id, decision, source, actor, created_at)
+       VALUES ($1, $2, $3, 'approve', 'human', 'legacy-actor', now())`,
+      [`${run.runId}-final-decision`, run.runId, run.taskId],
+    );
+
+    expect((await env.repo.getDecisionState(run.runId))?.hasDecision).toBe(true);
+    const attempt = await decisionFor(run, 'approve');
+    await expect(env.repo.recordDecision(attempt.args)).rejects.toBeInstanceOf(
+      DecisionConflictError,
+    );
+    const stored = await env.db.query('SELECT actor FROM approvals WHERE run_id=$1', [run.runId]);
+    expect(stored.rows).toEqual([{ actor: 'legacy-actor' }]);
+  });
+
+  it('keeps the optional reason of a decision when it is retried', async () => {
+    const run = await insertRun();
+    const decision = await decisionFor(run, 'reject', 'dec-with-reason');
+    const withReason = {
+      ...decision.args,
+      approval: { ...decision.approval, reason: 'not viable' },
+    };
+
+    const created = await env.repo.recordDecision(withReason);
+    const retried = await env.repo.recordDecision(withReason);
+
+    expect(created.approval.reason).toBe('not viable');
+    expect(retried).toEqual({ approval: created.approval, created: false });
+    await expect(env.repo.recordDecision(decision.args)).rejects.toBeInstanceOf(
+      DecisionConflictError,
+    );
+  });
+
+  it('reports a decided run through getDecisionState, from Postgres alone', async () => {
+    const fresh = await insertRun();
+    expect(await env.repo.getDecisionState(fresh.runId)).toEqual({
+      status: 'CREATED',
+      hasDecision: false,
+      terminal: false,
+    });
+    expect(await env.repo.getDecisionState(newRunId('absent'))).toBeUndefined();
+
+    const decided = await insertRun();
+    await env.repo.recordDecision((await decisionFor(decided, 'reject')).args);
+    expect(await env.repo.getDecisionState(decided.runId)).toEqual({
+      status: 'CREATED',
+      hasDecision: true,
+      terminal: false,
+    });
+
+    const terminal = await insertRun();
+    await env.repo.updateStatus(terminal.runId, 'APPROVED');
+    expect(await env.repo.getDecisionState(terminal.runId)).toEqual({
+      status: 'APPROVED',
+      hasDecision: false,
+      terminal: true,
+    });
+  });
+
+  it('opening a gate twice returns the first gate unchanged', async () => {
     const run = await insertRun();
     const gateId = `gate-${run.runId}`.slice(0, 60);
     const artifacts = [{ resultId: `${run.runId}-r`, digest: DIGEST }];
@@ -170,10 +341,6 @@ describe('PostgreSQL repository and migrations (temporary database)', () => {
       artifacts: [{ resultId: 'other', digest: 'e'.repeat(64) }],
     });
     expect(second).toEqual(first);
-
-    await env.repo.closeGate(gateId);
-    const status = await env.db.query('SELECT status FROM review_gates WHERE gate_id=$1', [gateId]);
-    expect(status.rows).toEqual([{ status: 'decided' }]);
   });
 
   it('execution lifecycle: ensure is idempotent, input changes are refused, reset only affects uncertain', async () => {

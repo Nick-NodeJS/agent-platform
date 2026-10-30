@@ -12,7 +12,7 @@ terminal tools. OpenHands provides isolated workspaces and coding tools, which r
 - Run locally on the owner's Ubuntu machine, **sequentially**, with Temporal as the only coordinator. Roles are executed when needed;
   they are not always-running services.
 - The researcher and business owner will call model and search providers **directly** through the narrow typed `AgentExecutor` contract
-  (`AgentRoleIO`), with per-role configuration, execution and cost logging, and budgets and permissions enforced outside the model.
+  (`AgentRoleIO`), with per-role configuration, real usage metering on top of the existing execution and cost records (mock records exist today; metering and spending limits do not), and budgets and permissions enforced outside the model.
 - **OpenHands is deferred** until development tasks need code, file or terminal tools and isolated workspaces (roadmap step 8). It is not a prerequisite for research.
 - No LangGraph, Mastra, CrewAI or second coordinator. Parallel execution, Jira and cloud hosting come only after the local sequential flow is validated.
 - No product repository before research, evaluation and the owner's explicit approval, with a demand/acquisition feasibility check first.
