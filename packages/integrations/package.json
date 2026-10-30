@@ -12,6 +12,10 @@
     }
   },
   "dependencies": {
-    "@platform/contracts": "workspace:*"
+    "@platform/contracts": "workspace:*",
+    "proper-lockfile": "^4.1.2"
+  },
+  "devDependencies": {
+    "@types/proper-lockfile": "^4.1.4"
   }
 }

@@ -7,6 +7,8 @@ const baseSchema = z.object({
   TASK_QUEUE: z.string().default('agent-platform'),
   TASK_STORE_DIR: z.string().default('.task-data/tasks'),
   LOG_LEVEL: z.string().default('info'),
+  APPROVAL_TRUSTED_SIGNERS_FILE: z.string().optional(),
+  AGENT_LEASE_TTL_MS: z.coerce.number().int().min(1000).default(120000),
 });
 
 export const dbConfigSchema = z.object({ DATABASE_URL: z.string().url() });
@@ -32,5 +34,5 @@ export function loadBaseConfig(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export const WORKFLOW_NAME = 'researchProposalWorkflow';
-export const DECISION_SIGNAL = 'decision';
+export const DECISION_UPDATE = 'submitDecision';
 export const STATUS_QUERY = 'getStatus';

@@ -66,6 +66,10 @@ export const resultSchema = z
     kind: resultKindSchema,
     producedBy: z.enum(['mock', 'agent']),
     payload: z.record(z.unknown()),
+    digest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
     createdAt: timestampSchema,
   })
   .strict();
@@ -80,6 +84,12 @@ export const approvalSchema = z
     source: z.enum(['human', 'agent']),
     actor: z.string().min(1),
     reason: z.string().optional(),
+    decisionId: idSchema.optional(),
+    keyId: idSchema.optional(),
+    envelopeDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
     createdAt: timestampSchema,
   })
   .strict();
@@ -116,14 +126,3 @@ export const businessEvaluationSchema = z
   })
   .strict();
 export type BusinessEvaluation = z.infer<typeof businessEvaluationSchema>;
-
-export const humanDecisionSignalSchema = z
-  .object({
-    decisionId: idSchema,
-    decision: z.enum(['approve', 'reject']),
-    source: z.enum(['human', 'agent']),
-    actor: z.string().min(1),
-    reason: z.string().optional(),
-  })
-  .strict();
-export type DecisionSignal = z.infer<typeof humanDecisionSignalSchema>;

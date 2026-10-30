@@ -14,11 +14,22 @@
 
 Monorepo, contracts, local task store, mock executor, Postgres persistence + migrations, Temporal worker, `researchProposalWorkflow`, CLI, Compose infra, CI, docs. See `docs/validation-report.md` for what was actually verified.
 
+## Review-fix scope (four findings from the milestone-1 review)
+
+1. Approvals only for the current review gate (Update + validator, gate bound to artifact IDs/digests, no buffering).
+2. Human approval is a verifiable Ed25519-signed envelope from a trusted human-controlled signer (not a string claim).
+3. Durable, fenced agent executions: reuse on retry, `uncertain` instead of blind re-runs, actual attempt accounting.
+4. Cross-process task file locking with forward-only status ordering and rebuildable Markdown.
+
 ## Unresolved / blockers
 
 - OpenHands Agent Server container setup not verified; no Compose service (see `docs/architecture.md`).
 - No real model execution; model profiles are placeholders.
-- Activity-retry idempotency is covered by unit tests and DB constraints, not by fault injection against a live Temporal.
+- Container/network/user isolation for agents is a documented plan only (`docs/architecture.md`); it must be enforced before any real agent execution. Signing does not protect against an agent running as the approver's OS user.
+- Exactly-once billing cannot be guaranteed by Postgres alone; external idempotency depends on the provider/runtime.
+- Task-file locking is verified on a local Linux filesystem only (not NFS/SMB).
+- `pnpm test:integration` and `pnpm smoke` need Docker infra and are not run in CI.
+- Pre-change workflow histories are not replay-compatible (start new runs).
 
 ## Next milestone
 

@@ -88,7 +88,7 @@ describe('LocalTaskStore', () => {
   it('leaves no temp files and writes markdown', async () => {
     await store.createTask(task());
     await store.attachResult('task-1', result);
-    const files = (await readdir(dir)).sort();
+    const files = (await readdir(dir)).filter((f) => !f.startsWith('.')).sort();
     expect(files).toEqual(['task-1.json', 'task-1.md']);
     expect(await readFile(path.join(dir, 'task-1.md'), 'utf8')).toContain('research-proposal');
   });
@@ -159,5 +159,26 @@ describe('executors', () => {
         input: {},
       }),
     ).rejects.toBeInstanceOf(RealExecutionNotImplementedError);
+  });
+});
+
+describe('LocalTaskStore locks are per task', () => {
+  it('interleaved operations on different tasks in one process do not interfere', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'tasks-multi-'));
+    try {
+      const store = new LocalTaskStore({ rootDir: dir, lockTimeoutMs: 5000 });
+      const ids = ['task-a', 'task-b', 'task-c'];
+      await Promise.all(ids.map((id) => store.createTask(task(id))));
+      await Promise.all(
+        ids.flatMap((id) =>
+          Array.from({ length: 10 }, (_, i) =>
+            store.attachResult(id, { ...result, taskId: id, resultId: `${id}-r${i}` }),
+          ),
+        ),
+      );
+      for (const id of ids) expect(await store.getResults(id)).toHaveLength(10);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

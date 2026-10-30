@@ -13,10 +13,16 @@ export interface TaskStore {
   locate(taskId: string): string;
 }
 
+/** Thrown by an executor to signal that NO external work was started (safe to retry without risk of double billing). */
+export class ExecutorNotStartedError extends Error {}
+
 export interface AgentRunRequest<I> {
   role: AgentRole;
   runId: string;
-  /** Stable across retries; executors must tolerate repeats. No exactly-once guarantee for external systems. */
+  /**
+   * Stable across retries of the same stage and input. Passed to the runtime so it CAN deduplicate; this only
+   * helps if the provider/runtime actually implements idempotency. No exactly-once guarantee for external systems.
+   */
   idempotencyKey: string;
   input: I;
 }

@@ -1,3 +1,4 @@
+import type { ReviewGate } from './approval.js';
 import type { ResourceConstraints, Status } from './records.js';
 
 export interface ResearchProposalInput {
@@ -17,5 +18,13 @@ export interface WorkflowStatus {
   taskId?: string;
   stages: StageEntry[];
   resultIds: string[];
-  decision?: { decision: 'approve' | 'reject'; source: 'human'; actor: string; reason?: string };
+  gate?: ReviewGate;
+  decision?: {
+    decision: 'approve' | 'reject';
+    source: 'human';
+    actor: string;
+    keyId: string;
+    decisionId: string;
+    reason?: string;
+  };
 }

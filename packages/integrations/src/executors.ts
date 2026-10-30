@@ -1,10 +1,11 @@
-import type {
-  AgentExecutor,
-  AgentRunRequest,
-  AgentRunResponse,
-  BusinessEvaluation,
-  ResearchProposal,
-  ResourceConstraints,
+import {
+  ExecutorNotStartedError,
+  type AgentExecutor,
+  type AgentRunRequest,
+  type AgentRunResponse,
+  type BusinessEvaluation,
+  type ResearchProposal,
+  type ResourceConstraints,
 } from '@platform/contracts';
 
 export interface ResearcherInput {
@@ -53,7 +54,7 @@ export class MockAgentExecutor implements AgentExecutor {
   }
 }
 
-export class RealExecutionNotImplementedError extends Error {}
+export class RealExecutionNotImplementedError extends ExecutorNotStartedError {}
 
 /**
  * OpenHands execution boundary (deferred). No requests are implemented in milestone 1,

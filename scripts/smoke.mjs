@@ -1,7 +1,9 @@
 // End-to-end smoke test against local infra (pnpm infra:up && pnpm db:migrate first).
 // Mock mode only: no API keys, no network beyond loopback.
 import { spawn, execFile } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createRequire } from 'node:module';
 import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
@@ -13,7 +15,22 @@ const dbRequire = createRequire(new URL('../packages/persistence/package.json', 
 const { Client, Connection } = cliRequire('@temporalio/client');
 const pg = dbRequire('pg');
 
-const cli = async (...args) => (await run('node', ['apps/cli/dist/main.js', ...args])).stdout;
+const keyDir = mkdtempSync(path.join(os.tmpdir(), 'smoke-approval-'));
+const keyPath = path.join(keyDir, 'keys');
+// The worker environment gets ONLY the public trusted-signers file; the private signer path goes only to the CLI.
+const workerEnv = {
+  ...process.env,
+  APPROVAL_TRUSTED_SIGNERS_FILE: path.join(keyPath, 'trusted-signers.json'),
+};
+delete workerEnv.APPROVAL_SIGNER_FILE;
+const cliEnv = { ...workerEnv, APPROVAL_SIGNER_FILE: path.join(keyPath, 'signer.json') };
+const cli = async (...args) =>
+  (await run('node', ['apps/cli/dist/main.js', ...args], { env: cliEnv })).stdout;
+const cliResult = (...args) =>
+  run('node', ['apps/cli/dist/main.js', ...args], { env: cliEnv }).then(
+    (r) => ({ code: 0, out: r.stdout, err: r.stderr }),
+    (e) => ({ code: e.code, out: e.stdout ?? '', err: e.stderr ?? '' }),
+  );
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const assert = (cond, msg) => {
   if (!cond) throw new Error(`ASSERTION FAILED: ${msg}`);
@@ -22,7 +39,10 @@ const assert = (cond, msg) => {
 
 let worker;
 const startWorker = async () => {
-  worker = spawn('node', ['apps/worker/dist/main.js'], { stdio: ['ignore', 'pipe', 'inherit'] });
+  worker = spawn('node', ['apps/worker/dist/main.js'], {
+    stdio: ['ignore', 'pipe', 'inherit'],
+    env: workerEnv,
+  });
   await new Promise((resolve, reject) => {
     worker.stdout.on('data', (d) => String(d).includes('worker started') && resolve());
     worker.once('exit', (c) => reject(new Error(`worker exited early (${c})`)));
@@ -63,6 +83,7 @@ const approveId = `smoke-a-${suffix}`;
 const rejectId = `smoke-r-${suffix}`;
 
 try {
+  await cli('approval-keygen', '--actor', 'smoke-human', '--key-id', 'smoke-key', '--dir', keyPath);
   await startWorker();
 
   await cli(
@@ -79,16 +100,30 @@ try {
   await waitFor(rejectId, 'WAITING_FOR_HUMAN_APPROVAL');
   assert(true, 'workflows paused at WAITING_FOR_HUMAN_APPROVAL');
 
-  await client.workflow.getHandle(approveId).signal('decision', {
-    decisionId: 'agent-attempt',
-    decision: 'approve',
-    source: 'agent',
-    actor: 'business-owner',
-  });
-  await sleep(1500);
+  const forged = await client.workflow
+    .getHandle(approveId)
+    .executeUpdate('submitDecision', {
+      args: [
+        {
+          decisionId: 'agent-attempt',
+          decision: 'approve',
+          source: 'human',
+          actor: 'business-owner',
+        },
+      ],
+    })
+    .then(
+      () => 'accepted',
+      (e) => String(e.cause?.message ?? e.message),
+    );
+  assert(
+    /malformed/.test(forged),
+    `forged unsigned "source: human" decision is rejected (${forged})`,
+  );
+  await sleep(1000);
   assert(
     (await query(approveId)).status === 'WAITING_FOR_HUMAN_APPROVAL',
-    'agent-sourced approval does not unblock the workflow',
+    'forged decision does not unblock the workflow',
   );
 
   await stopWorker();
@@ -99,17 +134,13 @@ try {
     'workflow remains queryable after worker restart',
   );
 
-  await cli('approve', approveId, '--actor', 'smoke-human', '--reason', 'smoke');
-  await client.workflow
-    .getHandle(approveId)
-    .signal('decision', {
-      decisionId: 'dup',
-      decision: 'reject',
-      source: 'human',
-      actor: 'late',
-    })
-    .catch(() => undefined);
-  await cli('reject', rejectId, '--actor', 'smoke-human');
+  await cli('approve', approveId, '--reason', 'smoke');
+  const dup = await cliResult('reject', approveId);
+  assert(
+    dup.code === 0 && /already decided/.test(dup.out),
+    'duplicate decision after completion changes nothing',
+  );
+  await cli('reject', rejectId);
 
   for (const [id, expected] of [
     [approveId, 'APPROVED'],
@@ -155,6 +186,7 @@ try {
   process.exitCode = 1;
 } finally {
   if (worker && worker.exitCode === null) worker.kill('SIGTERM');
+  rmSync(keyDir, { recursive: true, force: true });
   await db.end();
   await connection.close();
 }

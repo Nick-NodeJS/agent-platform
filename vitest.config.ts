@@ -1,16 +1,10 @@
 import { defineConfig } from 'vitest/config';
-import { fileURLToPath } from 'node:url';
-
-const src = (p: string) => fileURLToPath(new URL(`./packages/${p}/src/index.ts`, import.meta.url));
+import { alias } from './vitest.shared.js';
 
 export default defineConfig({
-  resolve: {
-    alias: {
-      '@platform/contracts': src('contracts'),
-      '@platform/agents': src('agents'),
-      '@platform/integrations': src('integrations'),
-      '@platform/persistence': src('persistence'),
-    },
+  resolve: { alias },
+  test: {
+    include: ['packages/**/src/**/*.test.ts', 'apps/**/src/**/*.test.ts'],
+    testTimeout: 60000,
   },
-  test: { include: ['packages/**/src/**/*.test.ts', 'apps/**/src/**/*.test.ts'] },
 });
