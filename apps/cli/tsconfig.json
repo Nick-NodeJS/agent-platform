@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": { "outDir": "dist", "tsBuildInfoFile": "dist/.tsbuildinfo", "rootDir": "src" },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"],
+  "references": [
+    { "path": "../../packages/contracts" },
+    { "path": "../../packages/agents" },
+    { "path": "../../packages/integrations" },
+    { "path": "../../packages/persistence" }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "packages/agents" },
+    { "path": "packages/integrations" },
+    { "path": "packages/persistence" },
+    { "path": "apps/worker" },
+    { "path": "apps/cli" }
+  ]
+}

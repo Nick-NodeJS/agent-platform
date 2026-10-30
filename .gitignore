@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.log
+logs/
+.task-data/
+artifacts/
+.scratch/
+coverage/
