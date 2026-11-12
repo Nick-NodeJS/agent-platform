@@ -92,11 +92,13 @@ describe('Activities against Postgres and task files', () => {
     await decide(run.acts, run, signForGate(run.gate, { decision: 'approve' }, env.signer));
     const before = await env.repo.getRunSummary(run.runId);
 
-    for (const attempt of [
-      run.acts.createTaskAndRun({ runId: run.runId, goal: GOAL, constraints }),
-      run.acts.openReviewGate({ runId: run.runId, taskId: run.taskId }),
-    ]) {
-      const failure = await failureOf(attempt);
+    // Started one at a time: promises created up front would reject before a handler is attached to them.
+    const attempts = [
+      () => run.acts.createTaskAndRun({ runId: run.runId, goal: GOAL, constraints }),
+      () => run.acts.openReviewGate({ runId: run.runId, taskId: run.taskId }),
+    ];
+    for (const attempt of attempts) {
+      const failure = await failureOf(attempt());
       expect(failure).toBeInstanceOf(ApplicationFailure);
       expect(failure).toMatchObject({ type: RUN_ALREADY_DECIDED, nonRetryable: true });
     }
