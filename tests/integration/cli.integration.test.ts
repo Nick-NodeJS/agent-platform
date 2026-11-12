@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdir, stat } from 'node:fs/promises';
+import { chmod, mkdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { runCli } from '../../apps/cli/src/cli.js';
 import {
@@ -17,6 +17,8 @@ import {
 } from './harness.js';
 
 const OWNER_ONLY_MODE = 0o600;
+const READ_EXECUTE_ONLY_MODE = 0o500;
+const OWNER_ALL_MODE = 0o700;
 const UNREACHABLE_TEMPORAL = '127.0.0.1:1';
 
 describe('CLI commands against live Temporal + Postgres', () => {
@@ -179,6 +181,19 @@ describe('CLI commands against live Temporal + Postgres', () => {
     expect(rejected.out).toContain('final status: REJECTED');
   });
 
+  it('says so when the task file cannot be found, instead of silently showing no results', async () => {
+    const runId = newRunId('cli');
+    startedRuns.push(runId);
+    await cli(['start', '--goal', 'CLI goal missing file', '--run-id', runId]);
+    await waitForGate(env, runId);
+    await rm(path.join(env.tasksDir, `task-${runId}.json`));
+
+    const missing = await cli(['status', runId]);
+
+    expect(missing.code).toBe(0);
+    expect(missing.out).toContain(`task-${runId}.json (not found: check TASK_STORE_DIR`);
+  });
+
   it('lists executions and guards reconciliation behind an explicit confirmation', async () => {
     const runId = newRunId('cli');
     startedRuns.push(runId);
@@ -209,6 +224,8 @@ describe('CLI commands against live Temporal + Postgres', () => {
     expect(healthy.code).toBe(0);
     expect(healthy.out).toContain('ok   temporal reachable');
     expect(healthy.out).toContain('ok   migrations applied');
+    expect(healthy.out).toContain(`ok   task store directory writable (${env.tasksDir})`);
+    expect(healthy.out).toContain('ok   EXECUTION_MODE (mock)');
     expect(healthy.out).toContain('ok   approval trusted signers readable');
     expect(healthy.out).toContain('present (human CLI only)');
     expect(healthy.out).not.toContain('PRIVATE KEY');
@@ -216,10 +233,14 @@ describe('CLI commands against live Temporal + Postgres', () => {
     const broken = await cli(['doctor'], {
       TEMPORAL_ADDRESS: UNREACHABLE_TEMPORAL,
       DATABASE_URL: '',
+      EXECUTION_MODE: 'openhands',
       APPROVAL_SIGNER_FILE: path.join(env.keyDir, 'nowhere', 'signer.json'),
     });
     expect(broken.code).toBe(1);
     expect(broken.out).toContain('FAIL temporal reachable');
+    expect(broken.out).toContain(
+      'FAIL EXECUTION_MODE (openhands: real execution is not implemented',
+    );
     expect(broken.out).toContain('FAIL approval trusted signers configured');
     expect(broken.out).toContain('FAIL DATABASE_URL set');
     expect(broken.out).toContain('not found; only needed on the machine where a human approves');
@@ -230,4 +251,21 @@ describe('CLI commands against live Temporal + Postgres', () => {
     });
     expect(unreadable.out).toContain('FAIL approval trusted signers readable');
   });
+
+  it.skipIf(process.getuid?.() === 0)(
+    'doctor flags a task store directory that cannot be created',
+    async () => {
+      const readOnly = path.join(env.keyDir, 'read-only');
+      await mkdir(readOnly, { recursive: true });
+      await chmod(readOnly, READ_EXECUTE_ONLY_MODE);
+      try {
+        const result = await cli(['doctor'], { TASK_STORE_DIR: path.join(readOnly, 'tasks') });
+
+        expect(result.out).toContain('FAIL task store directory writable');
+        expect(result.code).toBe(1);
+      } finally {
+        await chmod(readOnly, OWNER_ALL_MODE);
+      }
+    },
+  );
 });

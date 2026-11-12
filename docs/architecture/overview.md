@@ -94,13 +94,13 @@ research. See [ADR 5](../decisions/0005-direct-api-research-first.md) and [secur
 
 ## Where things run and what must stay running
 
-| Piece                                       | Where                                                                                                                             | Needs to be running?                                            |
-| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| PostgreSQL 16.15, Temporal dev server 1.9.1 | Docker Compose ([`infra/compose.yaml`](../../infra/compose.yaml)), ports on `127.0.0.1` only (5433, 7233, UI 8233), named volumes | Yes, for any run (`pnpm infra:up`)                              |
-| Worker                                      | Host process `pnpm worker:start`                                                                                                  | Yes. If it stops, runs pause and resume when it returns         |
-| CLI                                         | Short-lived `pnpm cli ...` commands                                                                                               | Only while you issue a command                                  |
-| Task files                                  | `TASK_STORE_DIR` (default `.task-data/tasks`, relative to the process working directory)                                          | Not a process; start the CLI and worker from the same directory |
-| Approval keys                               | Outside the repository (default `~/.config/agent-platform/approval/`)                                                             | Not a process; only the public file is given to the worker      |
+| Piece                                       | Where                                                                                                                             | Needs to be running?                                                         |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| PostgreSQL 16.15, Temporal dev server 1.9.1 | Docker Compose ([`infra/compose.yaml`](../../infra/compose.yaml)), ports on `127.0.0.1` only (5433, 7233, UI 8233), named volumes | Yes, for any run (`pnpm infra:up`)                                           |
+| Worker                                      | Host process `pnpm worker:start`                                                                                                  | Yes. If it stops, runs pause and resume when it returns                      |
+| CLI                                         | Short-lived `pnpm cli ...` commands                                                                                               | Only while you issue a command                                               |
+| Task files                                  | `TASK_STORE_DIR` (default `.task-data/tasks`; a relative value is anchored at the repository root, an absolute one is used as is) | Not a process; the CLI and worker resolve the same folder from any directory |
+| Approval keys                               | Outside the repository (default `~/.config/agent-platform/approval/`)                                                             | Not a process; only the public file is given to the worker                   |
 
 **CI and tests are not deployment.** GitHub Actions runs the same Compose stack to execute tests; integration tests create
 temporary databases and task queues and delete them. There is no product deployment, cloud resource or hosted service. Setup

@@ -5,7 +5,6 @@
   "type": "module",
   "dependencies": {
     "@platform/contracts": "workspace:*",
-    "@platform/agents": "workspace:*",
     "@platform/integrations": "workspace:*",
     "@platform/persistence": "workspace:*",
     "@temporalio/client": "1.25.0",

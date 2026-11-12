@@ -135,8 +135,8 @@ real Temporal retries ([`executions.integration.test.ts`](../../tests/integratio
 - A failed workflow leaves `runs.status` and the task file at the last projected stage and shows as a Temporal failure (Temporal UI,
   `workflow:` line of `pnpm cli status`). Whether `status` can still answer the Query for a failed run is not covered by a test.
 - A rejected decision does not fail the workflow; only the Update fails and the CLI prints `decision NOT accepted: <reason>` and exits 1.
-- `EXECUTION_MODE=openhands` starts the worker with a warning; the first agent Activity then fails with non-retryable
-  `ExecutorNotStarted` (real execution is not implemented) and the workflow fails. It never falls back to the mock.
+- `EXECUTION_MODE=openhands` is refused at worker start (`assertSupportedExecutionMode`: real execution is not implemented), so a run never
+  begins and then fails at its first agent stage. It never falls back to the mock; `pnpm doctor` reports the mode as a failed check.
 - If the worker is stopped, runs wait; Updates submitted meanwhile are processed after the worker returns (integration test
   "waiting and decision processing survive a worker restart").
 

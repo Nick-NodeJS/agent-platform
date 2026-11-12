@@ -1,5 +1,5 @@
 import { STATUS_QUERY, idSchema, loadConfig, workflowStatusSchema } from '@platform/contracts';
-import { LocalTaskStore } from '@platform/integrations';
+import { LocalTaskStore, resolveTaskStoreDir } from '@platform/integrations';
 import { createPool, RunRepository } from '@platform/persistence';
 import { requirePositional, type ParsedArgs } from '../args.js';
 import { openTemporal, temporalUiUrl, type CliContext } from '../context.js';
@@ -26,9 +26,12 @@ export async function statusCommand(ctx: CliContext, args: ParsedArgs): Promise<
     ctx.out(`  ${stage.at}  ${stage.stage}`);
   }
   if (status.taskId) {
-    const tasks = new LocalTaskStore({ rootDir: config.TASK_STORE_DIR });
+    const tasks = new LocalTaskStore({ rootDir: resolveTaskStoreDir(config.TASK_STORE_DIR) });
     ctx.out(`task:      ${status.taskId}`);
-    ctx.out(`task file: ${tasks.locate(status.taskId)}`);
+    const taskFound = (await tasks.getTask(status.taskId)) !== undefined;
+    ctx.out(
+      `task file: ${tasks.locate(status.taskId)}${taskFound ? '' : ' (not found: check TASK_STORE_DIR; the worker and CLI must use the same one)'}`,
+    );
     for (const result of await tasks.getResults(status.taskId)) {
       ctx.out(`result:    ${result.kind} (${result.producedBy}) ${JSON.stringify(result.payload)}`);
     }

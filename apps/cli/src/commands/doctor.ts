@@ -1,7 +1,9 @@
-import { existsSync } from 'node:fs';
+import { accessSync, constants, existsSync } from 'node:fs';
+import path from 'node:path';
 import net from 'node:net';
 import { loadBaseConfig } from '@platform/contracts';
 import { loadTrustedSigners } from '@platform/contracts/node';
+import { resolveTaskStoreDir } from '@platform/integrations';
 import { createPool } from '@platform/persistence';
 import { signerFilePath, type CliContext } from '../context.js';
 
@@ -26,6 +28,25 @@ const canConnect = (host: string, port: number) =>
     socket.once('error', () => finish(false));
     socket.once('timeout', () => finish(false));
   });
+
+/** The task store directory is created on first use, so it must be creatable: its nearest existing parent must be writable. */
+function checkTaskStoreDirectory(configured: string): Check {
+  const directory = resolveTaskStoreDir(configured);
+  let existing = directory;
+  while (!existsSync(existing) && path.dirname(existing) !== existing) {
+    existing = path.dirname(existing);
+  }
+  try {
+    accessSync(existing, constants.W_OK);
+    return { name: 'task store directory writable', ok: true, detail: directory };
+  } catch {
+    return {
+      name: 'task store directory writable',
+      ok: false,
+      detail: `${directory}: ${existing} is not writable`,
+    };
+  }
+}
 
 function checkTrustedSigners(file: string | undefined): Check {
   if (!file) {
@@ -79,7 +100,15 @@ export async function doctorCommand(ctx: CliContext): Promise<number> {
       ok: nodeMajor >= MIN_NODE_MAJOR,
       detail: process.versions.node,
     },
-    { name: 'EXECUTION_MODE', ok: true, detail: config.EXECUTION_MODE },
+    {
+      name: 'EXECUTION_MODE',
+      ok: config.EXECUTION_MODE === 'mock',
+      detail:
+        config.EXECUTION_MODE === 'mock'
+          ? 'mock'
+          : `${config.EXECUTION_MODE}: real execution is not implemented, the worker will refuse to start`,
+    },
+    checkTaskStoreDirectory(config.TASK_STORE_DIR),
     {
       name: 'temporal reachable',
       ok: await canConnect(host ?? '127.0.0.1', Number(port ?? DEFAULT_TEMPORAL_PORT)),

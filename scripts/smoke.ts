@@ -10,6 +10,7 @@ import pg from 'pg';
 import { z } from 'zod';
 import { Client, Connection, WorkflowUpdateFailedError } from '@temporalio/client';
 import { STATUS_QUERY, workflowStatusSchema, type WorkflowStatus } from '@platform/contracts';
+import { resolveTaskStoreDir } from '@platform/integrations';
 
 if (existsSync('.env')) {
   process.loadEnvFile('.env');
@@ -120,7 +121,7 @@ async function main(): Promise<void> {
   });
   const client = new Client({ connection });
   const db = new pg.Pool({ connectionString: process.env['DATABASE_URL'] });
-  const taskDir = process.env['TASK_STORE_DIR'] ?? '.task-data/tasks';
+  const taskDir = resolveTaskStoreDir(process.env['TASK_STORE_DIR'] ?? '.task-data/tasks');
 
   const query = async (runId: string): Promise<WorkflowStatus> =>
     workflowStatusSchema.parse(await client.workflow.getHandle(runId).query(STATUS_QUERY));

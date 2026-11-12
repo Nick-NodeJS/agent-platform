@@ -2,7 +2,7 @@
 
 Every workspace package and app, what it owns, and where to change things. Symbols are named, not copied, so this page does
 not drift with signatures; read the linked file for the exact shape. Dependency direction: `contracts` ← everything;
-`apps/*` depend on all packages; packages never depend on apps.
+`apps/*` depend on `contracts`, `integrations` and `persistence`; packages never depend on apps. `packages/agents` currently has no consumer outside its own tests.
 
 ## Apps and packages
 
@@ -20,17 +20,17 @@ loaded into them. [`infra/compose.yaml`](../../infra/compose.yaml) runs PostgreS
 
 ## What is real, mock, or unused today
 
-| Item                                                                                    | State                                                                                                                                                         |
-| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MockAgentExecutor`                                                                     | **Implemented mock.** Deterministic, offline, cost 0, outputs marked fictional                                                                                |
-| `OpenHandsAgentExecutor`, `EXECUTION_MODE=openhands`                                    | **Stub.** Always throws `RealExecutionNotImplementedError` (a "not started" error); config requires `OPENHANDS_*` variables that nothing reads                |
-| `ROLE_DEFINITIONS`, `assertProfileConfigured`, `ModelProfile` (provider, model, budget) | **Unused extension point.** Placeholder profiles; the CLI and worker declare the package but do not import it. The mock ignores instructions and budgets      |
-| `loadPolicyContext`                                                                     | **Implemented, not wired.** Tested; no executor calls it yet because no coding/review agent exists                                                            |
-| Roles `product-manager`, `architect`, `developer`, `qa`, `devops`                       | Names exist in `agentRoleSchema`; no stage, input/output types or executor support. Only `researcher` and `business-owner` are executable (`AgentRoleIO`)     |
-| `cost_entries`, `execution_events` tables                                               | Written (cost always 0 for the mock). `status` and `executions` print cost totals; `execution_events` is write-only in practice. Budgets are **not** enforced |
-| Review gate revision                                                                    | Always revision 1 (`gateIdFor`); there is no revise-and-resubmit flow                                                                                         |
-| `TaskStore` adapters                                                                    | Only `LocalTaskStore`. Jira is a documented future adapter, not stubbed                                                                                       |
-| Approvals with `source: 'agent'`                                                        | The schema allows an agent-sourced approval record; nothing creates one and the workflow never accepts it                                                     |
+| Item                                                                                    | State                                                                                                                                                                                                                    |
+| --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `MockAgentExecutor`                                                                     | **Implemented mock.** Deterministic, offline, cost 0, outputs marked fictional                                                                                                                                           |
+| `OpenHandsAgentExecutor`, `EXECUTION_MODE=openhands`                                    | **Stub.** The executor always throws `RealExecutionNotImplementedError` (a "not started" error); the worker refuses to start with `EXECUTION_MODE=openhands`; config requires `OPENHANDS_*` variables that nothing reads |
+| `ROLE_DEFINITIONS`, `assertProfileConfigured`, `ModelProfile` (provider, model, budget) | **Unused extension point.** Placeholder profiles; no app depends on or imports the package (the unused dependency was removed). The mock ignores instructions and budgets                                                |
+| `loadPolicyContext`                                                                     | **Implemented, not wired.** Tested; no executor calls it yet because no coding/review agent exists                                                                                                                       |
+| Roles `product-manager`, `architect`, `developer`, `qa`, `devops`                       | Names exist in `agentRoleSchema`; no stage, input/output types or executor support. Only `researcher` and `business-owner` are executable (`AgentRoleIO`)                                                                |
+| `cost_entries`, `execution_events` tables                                               | Written (cost always 0 for the mock). `status` and `executions` print cost totals; `execution_events` is write-only in practice. Budgets are **not** enforced                                                            |
+| Review gate revision                                                                    | Always revision 1 (`gateIdFor`); there is no revise-and-resubmit flow                                                                                                                                                    |
+| `TaskStore` adapters                                                                    | Only `LocalTaskStore`. Jira is a documented future adapter, not stubbed                                                                                                                                                  |
+| Approvals with `source: 'agent'`                                                        | The schema allows an agent-sourced approval record; nothing creates one and the workflow never accepts it                                                                                                                |
 
 ## Change map
 

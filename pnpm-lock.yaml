@@ -64,9 +64,6 @@ importers:
 
   apps/cli:
     dependencies:
-      '@platform/agents':
-        specifier: workspace:*
-        version: link:../../packages/agents
       '@platform/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -85,9 +82,6 @@ importers:
 
   apps/worker:
     dependencies:
-      '@platform/agents':
-        specifier: workspace:*
-        version: link:../../packages/agents
       '@platform/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
