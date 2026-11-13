@@ -2,10 +2,11 @@ import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import pino from 'pino';
 import { NativeConnection, Worker } from '@temporalio/worker';
-import { loadConfig } from '@platform/contracts';
+import { loadConfig, MAX_HEARTBEAT_THROTTLE_MS } from '@platform/contracts';
 import { createExecutor, LocalTaskStore, resolveTaskStoreDir } from '@platform/integrations';
 import { createPool, RunRepository } from '@platform/persistence';
 import { createActivities } from './activities.js';
+import { temporalActivityRuntime } from './temporal-activity-runtime.js';
 import { assertNoPrivateSigningKey, assertSupportedExecutionMode } from './worker-env.js';
 
 if (existsSync('.env')) {
@@ -32,6 +33,7 @@ const activities = createActivities({
   executor: createExecutor(config.EXECUTION_MODE),
   trustedSignersFile: config.APPROVAL_TRUSTED_SIGNERS_FILE || undefined,
   leaseTtlMs: config.AGENT_LEASE_TTL_MS,
+  runtime: temporalActivityRuntime,
 });
 
 const connection = await NativeConnection.connect({ address: config.TEMPORAL_ADDRESS });
@@ -41,6 +43,7 @@ const worker = await Worker.create({
   taskQueue: config.TASK_QUEUE,
   workflowsPath: fileURLToPath(new URL('./workflows/index.js', import.meta.url)),
   activities,
+  maxHeartbeatThrottleInterval: MAX_HEARTBEAT_THROTTLE_MS,
 });
 
 log.info(

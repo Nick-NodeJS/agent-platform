@@ -113,6 +113,10 @@ describe('configuration boundary', () => {
 
   it('rejects an invalid lease TTL and a missing database URL', () => {
     expect(() => loadConfig({ ...database, AGENT_LEASE_TTL_MS: '10' })).toThrow();
+    expect(() => loadConfig({ ...database, AGENT_LEASE_TTL_MS: '19999' })).toThrow();
+    expect(loadConfig({ ...database, AGENT_LEASE_TTL_MS: '20000' }).AGENT_LEASE_TTL_MS).toBe(
+      20_000,
+    );
     expect(() => loadConfig({})).toThrow();
   });
 

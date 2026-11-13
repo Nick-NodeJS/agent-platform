@@ -24,7 +24,7 @@ import {
   verifyApproval,
 } from '@platform/contracts/node';
 import { DecisionConflictError, type RunRepository } from '@platform/persistence';
-import { runAgentStage } from './agent-stage.js';
+import { runAgentStage, type ActivityRuntime } from './agent-stage.js';
 
 export interface ActivityDeps {
   repo: RunRepository;
@@ -35,6 +35,8 @@ export interface ActivityDeps {
   leaseTtlMs?: number;
   persistAttempts?: number;
   now?: () => Date;
+  /** Heartbeat and cancellation of the running Activity; omit outside Temporal. */
+  runtime?: ActivityRuntime;
 }
 
 export const RUN_ALREADY_DECIDED = 'RunAlreadyDecided';
@@ -60,6 +62,7 @@ export function createActivities(deps: ActivityDeps) {
     leaseTtlMs: deps.leaseTtlMs ?? DEFAULT_AGENT_LEASE_TTL_MS,
     ...(deps.persistAttempts !== undefined && { persistAttempts: deps.persistAttempts }),
     now,
+    ...(deps.runtime && { runtime: deps.runtime }),
   };
   const event = (runId: string, eventId: string, type: string, data: Record<string, unknown>) =>
     repo.insertEvent({

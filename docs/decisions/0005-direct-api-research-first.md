@@ -19,7 +19,7 @@ terminal tools. OpenHands provides isolated workspaces and coding tools, which r
 
 ## Consequences
 
-- The executor, timeouts (the workflow uses a 1-minute Activity timeout), output validation and budget enforcement must be designed in roadmap step 3.
+- Timeouts, heartbeats and cancellation are in place (F2, [`execution-limits.ts`](../../packages/contracts/src/execution-limits.ts): 10-minute agent stage, 30 s heartbeat timeout, abort signal to the executor). The real executor, output validation and budget enforcement must still be built in roadmap step 3.
 - `OpenHandsAgentExecutor` stays a stub that fails as "not started"; `EXECUTION_MODE=openhands` is not usable.
 - The owner's budgets, markets and acquisition assumptions are not decided here.
 

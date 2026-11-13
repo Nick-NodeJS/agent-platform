@@ -58,7 +58,7 @@ Documented, **not implemented** (no sandbox, container isolation or network sepa
 - Agents run in containers/VMs as an unprivileged user with no host mounts beyond their workspace and no Docker socket.
 - Separate networks or firewall rules so agent processes cannot reach Temporal, PostgreSQL or the UI, and can reach only allowlisted provider/search hosts.
 - Approval keys are never mounted into worker or agent containers; the approver CLI is not installed in agent images.
-- Budgets, per-role tool allowlists and timeouts are enforced by the executor/runtime, not by prompts (`ModelProfile.budget` and
+- Timeouts are enforced by Temporal and the platform (stage timeout, heartbeat timeout, abort signal), budgets and per-role tool allowlists by the executor/runtime, not by prompts (`ModelProfile.budget` and
   `assertProfileConfigured` exist but are unused). Prompt instructions are never a security boundary.
 - Real provider usage metering and reconciliation (today only mock records with cost 0 exist), enforced runtime spending limits, and provider-side spend limits as a second line of defense. Having cost tables or a `budget` profile field does **not** mean budgets are enforced.
 - An authenticated approval API or hardware-backed signing for any non-local setup.

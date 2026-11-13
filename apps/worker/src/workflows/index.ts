@@ -10,6 +10,9 @@ import {
   setHandler,
 } from '@temporalio/workflow';
 import {
+  AGENT_HEARTBEAT_TIMEOUT_MS,
+  AGENT_STAGE_MAX_ATTEMPTS,
+  AGENT_STAGE_TIMEOUT_MS,
   checkDecisionAgainstGate,
   type ApprovalEnvelope,
   type DecisionAck,
@@ -41,6 +44,22 @@ const activities = proxyActivities<Activities>({
     backoffCoefficient: ACTIVITY_RETRY_BACKOFF_COEFFICIENT,
     maximumInterval: ACTIVITY_RETRY_MAX_INTERVAL,
     nonRetryableErrorTypes: ['ApprovalRejected'],
+  },
+});
+
+/**
+ * Agent stages call external providers and can run for minutes, so they get a long timeout plus a heartbeat timeout:
+ * a dead worker is noticed after seconds and a live one keeps the Activity alive by heartbeating. More attempts than
+ * other Activities, because "execution in progress" retries must outlast the execution lease. See execution-limits.ts.
+ */
+const agentActivities = proxyActivities<Pick<Activities, 'runResearcher' | 'runBusinessOwner'>>({
+  startToCloseTimeout: AGENT_STAGE_TIMEOUT_MS,
+  heartbeatTimeout: AGENT_HEARTBEAT_TIMEOUT_MS,
+  retry: {
+    maximumAttempts: AGENT_STAGE_MAX_ATTEMPTS,
+    initialInterval: ACTIVITY_RETRY_INITIAL_INTERVAL,
+    backoffCoefficient: ACTIVITY_RETRY_BACKOFF_COEFFICIENT,
+    maximumInterval: ACTIVITY_RETRY_MAX_INTERVAL,
   },
 });
 
@@ -139,7 +158,7 @@ export async function researchProposalWorkflow(
 
   enterStage('RESEARCHING');
   await activities.markStage({ runId: input.runId, taskId, stage: 'RESEARCHING' });
-  const research = await activities.runResearcher({
+  const research = await agentActivities.runResearcher({
     runId: input.runId,
     taskId,
     goal: input.goal,
@@ -149,7 +168,7 @@ export async function researchProposalWorkflow(
 
   enterStage('EVALUATING');
   await activities.markStage({ runId: input.runId, taskId, stage: 'EVALUATING' });
-  const evaluation = await activities.runBusinessOwner({
+  const evaluation = await agentActivities.runBusinessOwner({
     runId: input.runId,
     taskId,
     constraints: input.constraints,

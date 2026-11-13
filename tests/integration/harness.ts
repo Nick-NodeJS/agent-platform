@@ -31,6 +31,7 @@ import {
   workflowStatusSchema,
   type AgentExecutor,
   type AgentRoleIO,
+  type AgentRunOptions,
   type AgentRunRequest,
   type AgentRunResponse,
   type ExecutableRole,
@@ -38,6 +39,7 @@ import {
   type WorkflowStatus,
   type PlatformConstraints,
   type ReviewGate,
+  MAX_HEARTBEAT_THROTTLE_MS,
 } from '@platform/contracts';
 import {
   generateSigner,
@@ -48,6 +50,7 @@ import {
 import { LocalTaskStore, MockAgentExecutor } from '@platform/integrations';
 import type { CliContext } from '../../apps/cli/src/context.js';
 import { createPool, migrate, RunRepository, type Db } from '@platform/persistence';
+import { temporalActivityRuntime } from '../../apps/worker/src/temporal-activity-runtime.js';
 import {
   createActivities,
   type Activities,
@@ -72,18 +75,41 @@ export class CountingExecutor implements AgentExecutor {
   failure: Error | undefined;
   private readonly inner = new MockAgentExecutor();
 
+  /** True once a call was interrupted through its abort signal. */
+  sawAbort = false;
+
   async run<R extends ExecutableRole>(
     request: AgentRunRequest<R>,
+    options?: AgentRunOptions,
   ): Promise<AgentRunResponse<AgentRoleIO[R]['output']>> {
     this.calls.push(request);
-    await this.gate;
+    await this.untilAborted(this.gate, options?.signal);
     if (this.delayMs > 0) {
-      await sleep(this.delayMs);
+      await this.untilAborted(sleep(this.delayMs), options?.signal);
     }
     if (this.failure) {
       throw this.failure;
     }
     return this.inner.run(request);
+  }
+
+  /** Waits for `wait` (if any) but rejects as soon as the signal aborts, like a well-behaved provider client. */
+  private untilAborted(wait: Promise<unknown> | undefined, signal?: AbortSignal): Promise<unknown> {
+    if (!wait) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve, reject) => {
+      const abort = () => {
+        this.sawAbort = true;
+        reject(new Error('aborted by the caller'));
+      };
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      signal?.addEventListener('abort', abort, { once: true });
+      wait.then(resolve, reject).finally(() => signal?.removeEventListener('abort', abort));
+    });
   }
 
   count(role?: ExecutableRole): number {
@@ -186,6 +212,7 @@ export async function startWorker(
     executor: new MockAgentExecutor(),
     trustedSignersFile: env.trustedFile,
     leaseTtlMs: 5000,
+    runtime: temporalActivityRuntime,
     ...overrides,
   });
   const worker = await Worker.create({
@@ -194,6 +221,7 @@ export async function startWorker(
     workflowBundle: env.bundle,
     activities: wrap ? wrap(acts) : acts,
     shutdownGraceTime: '2s',
+    maxHeartbeatThrottleInterval: MAX_HEARTBEAT_THROTTLE_MS,
   });
   const running = worker.run();
   return {
@@ -272,12 +300,12 @@ export async function waitForStatus(
 
 /** Bounded wait for a condition that is not exposed through the workflow status (e.g. an executor was called). */
 export async function waitUntil(
-  condition: () => boolean,
+  condition: () => boolean | Promise<boolean>,
   description: string,
   timeoutMs = DEFAULT_WAIT_MS,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
+  while (!(await condition())) {
     if (Date.now() > deadline) {
       throw new Error(`timeout waiting until ${description}`);
     }

@@ -1,7 +1,7 @@
 import { z } from 'zod';
+import { MIN_AGENT_LEASE_TTL_MS } from './execution-limits.js';
 
 export const DEFAULT_AGENT_LEASE_TTL_MS = 120_000;
-const MIN_AGENT_LEASE_TTL_MS = 1000;
 
 const baseSchema = z.object({
   EXECUTION_MODE: z.enum(['mock', 'openhands']).default('mock'),

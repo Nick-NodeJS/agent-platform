@@ -22,6 +22,7 @@ import {
   startWorker,
   terminateQuietly,
   waitForGate,
+  waitUntil,
   type Env,
   type RunningWorker,
 } from './harness.js';
@@ -523,6 +524,100 @@ describe('durable agent executions and Activity retries (live Temporal + Postgre
     await expect(runAgentStage(stageDeps(executor), researchStage(runId))).rejects.toMatchObject({
       type: 'CanonicalResultMissing',
     });
+    expect(executor.count()).toBe(1);
+  });
+
+  /** A stand-in for the Temporal Activity: counts heartbeats and lets a test abort the running Activity. */
+  const fakeActivity = () => {
+    const controller = new AbortController();
+    let heartbeats = 0;
+    return {
+      controller,
+      heartbeats: () => heartbeats,
+      runtime: {
+        heartbeat: () => {
+          heartbeats++;
+        },
+        cancellationSignal: () => controller.signal,
+      },
+    };
+  };
+
+  it('a running attempt heartbeats and renews its lease, so no other attempt can take the execution over', async () => {
+    const runId = await seededRun('renew');
+    const executor = new CountingExecutor();
+    executor.delayMs = 2500; // far longer than the 1 s lease below
+    const activity = fakeActivity();
+    const deps = { ...stageDeps(executor), leaseTtlMs: 1000, runtime: activity.runtime };
+
+    const first = runAgentStage(deps, researchStage(runId)).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    await waitUntil(() => executor.count() === 1, 'the first attempt is running');
+    await sleep(1500); // the original lease has expired by now unless it was renewed
+
+    const second = await runAgentStage(deps, researchStage(runId)).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(second).toMatchObject({ type: 'ExecutionInProgress', nonRetryable: false });
+    expect(second).toHaveProperty('nextRetryDelay');
+
+    const outcome = await first;
+    expect('value' in outcome).toBe(true);
+    expect(executor.count()).toBe(1);
+    expect(activity.heartbeats()).toBeGreaterThanOrEqual(5);
+    expect((await execution(runId, 'researcher', 'research')).state).toBe('succeeded');
+  });
+
+  it('cancelling the Activity during the external call stops the executor and leaves the execution uncertain', async () => {
+    const runId = await seededRun('abort');
+    const executor = new CountingExecutor();
+    executor.gate = new Promise<void>(() => undefined); // a provider call that never returns on its own
+    const activity = fakeActivity();
+    const deps = { ...stageDeps(executor), runtime: activity.runtime };
+
+    const attempt = runAgentStage(deps, researchStage(runId)).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await waitUntil(() => executor.count() === 1, 'the executor is running');
+    activity.controller.abort();
+
+    expect(await attempt).toMatchObject({ type: 'ExecutionOutcomeUncertain' });
+    expect(executor.sawAbort).toBe(true);
+    const record = await execution(runId, 'researcher', 'research');
+    expect(record.state).toBe('uncertain');
+    expect(record.uncertainReason).toContain('aborted by the caller');
+  });
+
+  it('an Activity cancelled before the call started gives the claim back and counts no attempt', async () => {
+    const runId = await seededRun('precancel');
+    const executor = new CountingExecutor();
+    const activity = fakeActivity();
+    activity.controller.abort();
+
+    const outcome = await runAgentStage(
+      { ...stageDeps(executor), runtime: activity.runtime },
+      researchStage(runId),
+    ).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    expect(outcome).toMatchObject({ type: 'ExecutionCancelled', nonRetryable: false });
+    expect(executor.count()).toBe(0);
+    const record = await execution(runId, 'researcher', 'research');
+    expect(record).toMatchObject({
+      state: 'pending',
+      attempts: 0,
+      invokedAt: null,
+      leaseOwner: null,
+    });
+    // The next attempt can claim it and run normally.
+    const next = await runAgentStage(stageDeps(executor), researchStage(runId));
+    expect(next.reused).toBe(false);
     expect(executor.count()).toBe(1);
   });
 });

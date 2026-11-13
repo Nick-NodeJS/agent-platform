@@ -118,6 +118,10 @@ Each agent stage has one row in `agent_executions` keyed by `runId:role:stage`. 
 | Executor says it never started (`ExecutorNotStartedError`)                                                                                                           | Execution returns to `pending` (attempt not counted); non-retryable `ExecutorNotStarted`; the workflow fails                 | Fix the cause, start the run again with the same ID (allowed: it failed and is undecided) |
 | Same stage, different input                                                                                                                                          | Non-retryable `ExecutionInputMismatch`                                                                                       | Use a new run                                                                             |
 
+Time limits of an agent stage (F2, all values in [`execution-limits.ts`](../../packages/contracts/src/execution-limits.ts)): the Activity may run 10 minutes, must heartbeat at least every 30 s
+(it does, every 10 s or less, together with its lease renewal), and gets 10 attempts; a retry that finds another attempt running waits 15 s. The executor receives an abort signal when the Activity is
+cancelled, times out or the worker stops; an abort during the call makes the execution `uncertain`, an abort before the call gives the claim back. Other Activities keep a 1-minute limit and 5 attempts.
+
 Uncertain execution, step by step:
 
 1. `pnpm cli executions <runId>` lists each execution with `state=`, `attempts=`, `cost=` and the stored reason.

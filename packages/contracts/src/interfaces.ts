@@ -52,13 +52,23 @@ export interface AgentRunResponse<O> {
   executedBy: 'mock' | 'agent';
 }
 
+export interface AgentRunOptions {
+  /**
+   * Aborted when the surrounding Activity is cancelled, times out or the worker shuts down. Implementations must stop
+   * the external call promptly and reject; the caller then treats the run as "may have started".
+   */
+  signal?: AbortSignal;
+}
+
 /**
  * Narrow execution boundary. Implementations must honor the same contract: report definitively-not-started
- * failures with ExecutorNotStartedError, and treat any other failure as "may have run".
+ * failures with ExecutorNotStartedError, treat any other failure as "may have run", honor `options.signal`, and keep
+ * each external call below `EXECUTOR_CALL_LIMIT_MS`.
  * Real runtimes return untrusted data: callers validate outputs before persisting them.
  */
 export interface AgentExecutor {
   run<R extends ExecutableRole>(
     request: AgentRunRequest<R>,
+    options?: AgentRunOptions,
   ): Promise<AgentRunResponse<AgentRoleIO[R]['output']>>;
 }

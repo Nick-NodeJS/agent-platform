@@ -4,6 +4,7 @@ import {
   type AgentExecutor,
   type AgentRoleIO,
   type AgentRunRequest,
+  type AgentRunOptions,
   type AgentRunResponse,
   type ExecutableRole,
 } from '@platform/contracts';
@@ -94,6 +95,7 @@ export class RealExecutionNotImplementedError extends ExecutorNotStartedError {}
 export class OpenHandsAgentExecutor implements AgentExecutor {
   async run<R extends ExecutableRole>(
     _request: AgentRunRequest<R>,
+    _options?: AgentRunOptions,
   ): Promise<AgentRunResponse<AgentRoleIO[R]['output']>> {
     throw new RealExecutionNotImplementedError(
       'Real agent execution is not implemented in milestone 1; use EXECUTION_MODE=mock.',

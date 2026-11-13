@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { ApplicationFailure } from '@temporalio/activity';
 import {
+  AGENT_HEARTBEAT_INTERVAL_MS,
+  EXECUTION_IN_PROGRESS_RETRY_DELAY_MS,
   ExecutorNotStartedError,
   canonicalJson,
   toCanonicalObject,
@@ -19,6 +21,17 @@ import {
   type RunRepository,
 } from '@platform/persistence';
 
+/**
+ * What the surrounding Temporal Activity provides. Injected so the stage runner also works outside Temporal (tests);
+ * the real implementation is `temporalActivityRuntime`.
+ */
+export interface ActivityRuntime {
+  /** Tells Temporal this attempt is alive; a worker that stops beating is detected after the heartbeat timeout. */
+  heartbeat: () => void;
+  /** Aborted when the Activity is cancelled, times out or the worker shuts down. */
+  cancellationSignal: () => AbortSignal;
+}
+
 export interface AgentStageDeps {
   repo: RunRepository;
   tasks: TaskStore;
@@ -27,6 +40,7 @@ export interface AgentStageDeps {
   /** In-attempt retries of the canonical persistence step after the executor already returned. */
   persistAttempts?: number;
   now?: () => Date;
+  runtime?: ActivityRuntime;
 }
 
 export interface AgentStageArgs<R extends ExecutableRole> {
@@ -50,11 +64,21 @@ export interface AgentStageResult<O> {
 
 export const UNCERTAIN_FAILURE = 'ExecutionOutcomeUncertain';
 export const BUSY_FAILURE = 'ExecutionInProgress';
+export const CANCELLED_FAILURE = 'ExecutionCancelled';
 
 const DEFAULT_PERSIST_ATTEMPTS = 3;
 const PERSIST_RETRY_BACKOFF_MS = 100;
 const MIN_HEARTBEAT_INTERVAL_MS = 250;
 const LEASE_RENEWALS_PER_TTL = 3;
+
+/** Another attempt still holds the execution: retry later (the lease is renewed while it runs). */
+const inProgressFailure = (message: string) =>
+  ApplicationFailure.create({
+    message,
+    type: BUSY_FAILURE,
+    nonRetryable: false,
+    nextRetryDelay: EXECUTION_IN_PROGRESS_RETRY_DELAY_MS,
+  });
 const IDEMPOTENCY_DIGEST_CHARS = 16;
 const MAX_EXECUTION_ID_CHARS = 200;
 
@@ -194,24 +218,26 @@ async function reuseOrExplainWhyNot<R extends ExecutableRole>(
   if (current?.state === 'uncertain') {
     throw uncertainFailure(executionId, current.uncertainReason ?? 'unknown');
   }
-  throw ApplicationFailure.retryable(
-    `execution ${executionId} is in progress elsewhere`,
-    BUSY_FAILURE,
-  );
+  throw inProgressFailure(`execution ${executionId} is in progress elsewhere`);
 }
 
-/** Keeps the lease alive while the attempt runs; reports (rather than hides) a lost lease. */
+/**
+ * Keeps the lease alive and heartbeats Temporal while the attempt runs; reports (rather than hides) a lost lease.
+ * Both use one timer, so a live attempt is never reported dead while its lease is being renewed.
+ */
 async function withLeaseRenewal<R extends ExecutableRole, T>(
-  { repo, leaseTtlMs }: AgentStageDeps,
+  { repo, leaseTtlMs, runtime }: AgentStageDeps,
   { executionId, token, fence }: ClaimedAttempt<R>,
   action: (isLeaseLost: () => boolean) => Promise<T>,
 ): Promise<T> {
   let leaseLost = false;
   const intervalMs = Math.max(
-    Math.floor(leaseTtlMs / LEASE_RENEWALS_PER_TTL),
+    Math.min(Math.floor(leaseTtlMs / LEASE_RENEWALS_PER_TTL), AGENT_HEARTBEAT_INTERVAL_MS),
     MIN_HEARTBEAT_INTERVAL_MS,
   );
+  runtime?.heartbeat();
   const timer = setInterval(() => {
+    runtime?.heartbeat();
     repo
       .renewLease(executionId, token, fence, leaseTtlMs)
       .then((renewed) => {
@@ -235,24 +261,33 @@ async function invokeAndPersist<R extends ExecutableRole>(
 ): Promise<AgentStageResult<AgentRoleIO[R]['output']>> {
   const { repo, executor } = deps;
   const { executionId, inputDigest, token, fence, args } = attempt;
+  const signal = deps.runtime?.cancellationSignal();
 
+  if (signal?.aborted) {
+    // Nothing was started, so nothing is counted and the claim is given back for the next attempt.
+    await repo.releaseUninvokedClaim(executionId, token, fence);
+    throw ApplicationFailure.retryable('cancelled before the executor started', CANCELLED_FAILURE);
+  }
   try {
     await repo.markInvoked(executionId, token, fence);
   } catch (error) {
     if (error instanceof StaleExecutionError) {
-      throw ApplicationFailure.retryable(error.message, BUSY_FAILURE);
+      throw inProgressFailure(error.message);
     }
     throw error;
   }
 
   let response;
   try {
-    response = await executor.run({
-      role: args.role,
-      runId: args.runId,
-      idempotencyKey: `${executionId}:${inputDigest.slice(0, IDEMPOTENCY_DIGEST_CHARS)}`,
-      input: args.input,
-    });
+    response = await executor.run(
+      {
+        role: args.role,
+        runId: args.runId,
+        idempotencyKey: `${executionId}:${inputDigest.slice(0, IDEMPOTENCY_DIGEST_CHARS)}`,
+        input: args.input,
+      },
+      { signal },
+    );
   } catch (error) {
     if (error instanceof ExecutorNotStartedError) {
       await repo.abortInvocation(executionId, token, fence);

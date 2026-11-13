@@ -526,6 +526,15 @@ export class RunRepository {
     }
   }
 
+  /** Gives up a claim before the external call started (for example the Activity was cancelled): nothing is counted. */
+  async releaseUninvokedClaim(executionId: string, token: string, fence: number): Promise<void> {
+    await this.db.query(
+      `UPDATE agent_executions SET state='pending', lease_owner=NULL, lease_expires_at=NULL, updated_at=now()
+        WHERE execution_id=$1 AND lease_owner=$2 AND fence=$3 AND state='running' AND invoked_at IS NULL`,
+      [executionId, token, fence],
+    );
+  }
+
   /** The executor definitively did not run (e.g. rejected before any external call): undo the invocation. */
   async abortInvocation(executionId: string, token: string, fence: number): Promise<void> {
     await this.db.query(
