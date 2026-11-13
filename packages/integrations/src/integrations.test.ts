@@ -1,13 +1,17 @@
 import { mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   ExecutorNotStartedError,
+  platformConstraintsSchema,
+  researchProposalSchema,
   type Approval,
   type Result,
   type Task,
 } from '@platform/contracts';
+import { loadPlatformConstraints } from '@platform/contracts/node';
 import {
   createExecutor,
   LocalTaskStore,
@@ -17,6 +21,9 @@ import {
 } from './index.js';
 
 const ts = '2026-01-01T00:00:00.000Z';
+const DEFAULT_CONSTRAINTS_FILE = fileURLToPath(
+  new URL('../../../config/platform-constraints.json', import.meta.url),
+);
 const task = (id = 'task-1'): Task => ({
   taskId: id,
   runId: 'run-1',
@@ -130,12 +137,7 @@ describe('redactString', () => {
 });
 
 describe('executors', () => {
-  const constraints = {
-    budgetUsd: 'unknown',
-    teamSize: 3,
-    timelineWeeks: 'unknown',
-    notes: 'unknown',
-  } as const;
+  const constraints = platformConstraintsSchema.parse({ limits: { buildBudgetUsd: 50 } });
   const researcherRequest = {
     role: 'researcher',
     runId: 'run-1',
@@ -143,31 +145,66 @@ describe('executors', () => {
     input: { goal: 'g', constraints },
   } as const;
 
-  it('mock researcher is deterministic, fictional, and records unknown constraints', async () => {
+  it('mock researcher is deterministic, marked fictional, and records unknown limits', async () => {
     const executor = new MockAgentExecutor();
     const first = await executor.run(researcherRequest);
     const second = await executor.run(researcherRequest);
     expect(first.output).toEqual(second.output);
     expect(first.output.fictionalExample).toBe(true);
+    expect(researchProposalSchema.safeParse(first.output).success).toBe(true);
     expect(first.output.unknowns).toEqual([
-      'budgetUsd was not provided by the human owner',
-      'timelineWeeks was not provided by the human owner',
-      'notes was not provided by the human owner',
+      'limits.monthlyRunCapUsd was not provided by the human owner',
+      'limits.launchDeadlineWeeks was not provided by the human owner',
+      'limits.minimumMonthlyMarginUsd was not provided by the human owner',
+      'limits.agentSpend was not provided by the human owner',
     ]);
     expect(first.usage.costUsd).toBe(0);
     expect(first.executedBy).toBe('mock');
   });
 
-  it('mock business owner never claims to be a human approval', async () => {
-    const proposal = (await new MockAgentExecutor().run(researcherRequest)).output;
-    const evaluation = await new MockAgentExecutor().run({
+  it('the mock proposal fits the owner-agreed default limits, so its evaluation proceeds', async () => {
+    const agreed = loadPlatformConstraints(DEFAULT_CONSTRAINTS_FILE);
+    const executor = new MockAgentExecutor();
+    const proposal = (
+      await executor.run({ ...researcherRequest, input: { goal: 'g', constraints: agreed } })
+    ).output;
+
+    const evaluation = await executor.run({
       role: 'business-owner',
       runId: 'run-1',
       idempotencyKey: 'key-2',
-      input: { proposal, constraints },
+      input: { proposal, constraints: agreed },
     });
+
+    expect(evaluation.output.recommendation).toBe('proceed');
+    expect(evaluation.output.constraintChecks.filter((check) => check.status === 'fail')).toEqual(
+      [],
+    );
     expect(evaluation.output.isHumanApproval).toBe(false);
     expect(evaluation.output.rationale).toContain(proposal.title);
+  });
+
+  it('the mock business owner recommends against a proposal that breaks the limits', async () => {
+    const tight = platformConstraintsSchema.parse({
+      limits: { buildBudgetUsd: 10 },
+      productTypes: { allowed: ['web'] },
+    });
+    const executor = new MockAgentExecutor();
+    const proposal = (await executor.run(researcherRequest)).output;
+
+    const evaluation = await executor.run({
+      role: 'business-owner',
+      runId: 'run-1',
+      idempotencyKey: 'key-3',
+      input: { proposal, constraints: tight },
+    });
+
+    expect(evaluation.output.recommendation).toBe('do-not-proceed');
+    expect(
+      evaluation.output.constraintChecks
+        .filter((check) => check.status === 'fail')
+        .map((check) => check.rule),
+    ).toEqual(['build-budget', 'product-type-allowed']);
   });
 
   it('real execution is rejected as "not started", never silently mocked', async () => {

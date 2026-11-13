@@ -45,22 +45,22 @@ for giving the policy to future platform-spawned coding/review agents.
 
 Recorded canonical roadmap. Status reflects what exists today; no future step is implemented.
 
-| #   | Step                                                                                      | Status                                                         |
-| --- | ----------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| 1   | Review the foundation and document current architecture                                   | **In review** (documentation delivered, awaiting owner review) |
-| 2   | Define research constraints, structured outputs, and acceptance criteria                  | Next; not started                                              |
-| 3   | Configure direct model/search providers, budgets, restricted tools, and execution logging | Not started                                                    |
-| 4   | Implement real researcher → BO evaluation → human approval                                | Not started                                                    |
-| 5   | Evaluate accuracy, usefulness, cost, and recovery on a small sample                       | Not started                                                    |
-| 6   | Validate selected product demand/acquisition feasibility before development approval      | Not started                                                    |
-| 7   | Create approved product repository; add PM → architect → reviewed stories                 | Not started                                                    |
-| 8   | Integrate isolated OpenHands execution: one story → PR → QA → fixes                       | Not started                                                    |
-| 9   | Add dev deployment, environment QA, and PM/BO acceptance                                  | Not started                                                    |
-| 10  | Expand parallel execution after the single-story flow is reliable                         | Not started                                                    |
-| 11  | Add Jira when local task files become inconvenient                                        | Not started                                                    |
-| 12  | Move continuous execution to cloud and scale according to measured demand                 | Not started                                                    |
+| #   | Step                                                                                      | Status                                                                             |
+| --- | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| 1   | Review the foundation and document current architecture                                   | **In review** (documentation delivered, awaiting owner review)                     |
+| 2   | Define research constraints, structured outputs, and acceptance criteria                  | **In review** (delivered with mock agents; owner confirmations pending, see below) |
+| 3   | Configure direct model/search providers, budgets, restricted tools, and execution logging | Not started                                                                        |
+| 4   | Implement real researcher → BO evaluation → human approval                                | Not started                                                                        |
+| 5   | Evaluate accuracy, usefulness, cost, and recovery on a small sample                       | Not started                                                                        |
+| 6   | Validate selected product demand/acquisition feasibility before development approval      | Not started                                                                        |
+| 7   | Create approved product repository; add PM → architect → reviewed stories                 | Not started                                                                        |
+| 8   | Integrate isolated OpenHands execution: one story → PR → QA → fixes                       | Not started                                                                        |
+| 9   | Add dev deployment, environment QA, and PM/BO acceptance                                  | Not started                                                                        |
+| 10  | Expand parallel execution after the single-story flow is reliable                         | Not started                                                                        |
+| 11  | Add Jira when local task files become inconvenient                                        | Not started                                                                        |
+| 12  | Move continuous execution to cloud and scale according to measured demand                 | Not started                                                                        |
 
-The owner's budgets, target markets and acquisition assumptions are not decided and must be supplied by the owner in step 2 and later.
+Step 2 decisions (owner, 2026-11-13): build budget 50 USD, monthly run cap 50 USD, launch within 4 weeks, API first (web and mobile allowed, mobile last), AWS preferred with any production-grade provider allowed, team size dropped, agent compute is a separate allowance, two human gates (start of implementation, go-live). Still open for the owner: minimum monthly margin, excluded domains, the agent allowance (Step 3), and confirmation of the assistant's default architecture thresholds. Target markets are chosen by the business-owner agent, not fixed. See the [research spec](research-spec.md) and [ADR 6](decisions/0006-limits-and-two-human-gates.md).
 Architecture: [overview](architecture/overview.md); decisions: [ADRs](decisions/README.md).
 
 ## Sources and versions

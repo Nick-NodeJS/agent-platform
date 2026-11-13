@@ -224,3 +224,28 @@ Manual check: `EXECUTION_MODE=openhands node apps/worker/dist/main.js` exits 1 w
 | `pnpm smoke`                                    | 15 assertions passed                                                          |
 
 Not run: CI for the new commit (see the final report for the push status). Workflow code and the `main.ts` entry points remain in the coverage denominator and uncovered, as described above.
+
+## Step 2: research constraints, structured outputs, acceptance (2026-11-13)
+
+Baseline: `87eb46b` (CI run #8 successful). Delivered with mock agents; see the [research spec](research-spec.md) and [ADR 6](decisions/0006-limits-and-two-human-gates.md).
+
+**What changed.** A validated constraints file (`config/platform-constraints.json`, owner-agreed limits) replaces the old `ResourceConstraints` (team size removed); `pnpm cli start` loads it and takes
+`--constraints-file`, `--build-budget-usd`, `--monthly-run-cap-usd`, `--launch-deadline-weeks`, `--notes` (the old `--budget-usd`, `--timeline-weeks`, `--team-size` flags are rejected with a pointer). The research proposal
+and business evaluation are structured and numeric. `checkProposalAgainstConstraints` and `enforceConstraintChecks` (run in the `runBusinessOwner` Activity) recompute the limit checks in code and turn a model's `proceed`
+into `do-not-proceed` when a rule fails. The mock executor produces a proposal that fits the agreed limits. The workflow itself was not changed.
+
+**Tests added or changed (executed):** `research.test.ts` (every rule, boundaries, justifications, unknown limits, enforcement, file loading and overrides), `contracts.test.ts` (constraints schema),
+`integrations.test.ts` (mock proposal fits the agreed limits and a tight one is rejected), `activities.integration.test.ts` (an optimistic executor is overridden by the platform), `cli.integration.test.ts`
+(file plus flag overrides stored in Postgres, a failed check visible in `status`, unusable files refused, removed flags rejected).
+
+| Check                                                                 | Result                                                                                                          |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile`, `pnpm verify`                       | passed                                                                                                          |
+| `pnpm test` (unit)                                                    | 117 tests in 11 files passed                                                                                    |
+| `pnpm db:migrate`, `pnpm test:coverage`                               | 176 tests in 17 files passed; **89.55% lines, 85.21% branches** (floor 80/80)                                   |
+| `pnpm smoke`                                                          | 15 assertions passed                                                                                            |
+| One-off replay of local histories against the current workflow bundle | 82 of 82 completed histories replayed (the older incompatible ones had expired from the dev server's retention) |
+
+**Limits of this milestone.** Everything is mock output. The owner still has to set the minimum monthly margin, excluded domains and the agent allowance, and confirm the assistant's default architecture thresholds
+(more than 2 deployable units; kubernetes, microservices, multi-region). A `do-not-proceed` evaluation does not stop the run yet (Step 4). Results stored before this change have the old proposal shape and cannot be read by the new schema.
+CI for the new commit has not been observed.

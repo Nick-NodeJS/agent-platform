@@ -1,12 +1,13 @@
 import { z } from 'zod';
 import { reviewGateSchema } from './approval.js';
 import { idSchema, timestampSchema } from './ids.js';
-import { statusSchema, type ResourceConstraints } from './records.js';
+import type { PlatformConstraints } from './constraints.js';
+import { statusSchema } from './records.js';
 
 export interface ResearchProposalInput {
   runId: string;
   goal: string;
-  constraints: ResourceConstraints;
+  constraints: PlatformConstraints;
 }
 
 /** Query result of the workflow. Parsed by clients because Temporal returns untyped JSON. */

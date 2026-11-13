@@ -10,5 +10,10 @@ const REPOSITORY_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
  * they are started from. Absolute values are used unchanged.
  */
 export function resolveTaskStoreDir(configured: string): string {
+  return resolveRepositoryPath(configured);
+}
+
+/** Absolute paths are used as given; relative ones are anchored at the repository root. */
+export function resolveRepositoryPath(configured: string): string {
   return path.isAbsolute(configured) ? configured : path.resolve(REPOSITORY_ROOT, configured);
 }

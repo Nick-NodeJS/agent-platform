@@ -4,7 +4,7 @@ import {
   idSchema,
   loadConfig,
   modelProfileSchema,
-  resourceConstraintsSchema,
+  platformConstraintsSchema,
 } from './index.js';
 
 describe('idSchema', () => {
@@ -30,14 +30,39 @@ describe('modelProfileSchema', () => {
     expect(modelProfileSchema.safeParse({ ...ok, maxSteps: 0 }).success).toBe(false));
 });
 
-describe('resourceConstraintsSchema', () => {
-  it('records missing constraints as unknown', () =>
-    expect(resourceConstraintsSchema.parse({})).toEqual({
-      budgetUsd: 'unknown',
-      teamSize: 'unknown',
-      timelineWeeks: 'unknown',
-      notes: 'unknown',
-    }));
+describe('platformConstraintsSchema', () => {
+  it('records every unset limit as unknown and applies the simple-architecture defaults', () => {
+    const parsed = platformConstraintsSchema.parse({});
+    expect(parsed.limits).toEqual({
+      buildBudgetUsd: 'unknown',
+      monthlyRunCapUsd: 'unknown',
+      launchDeadlineWeeks: 'unknown',
+      minimumMonthlyMarginUsd: 'unknown',
+      agentSpend: 'unknown',
+    });
+    expect(parsed.hosting).toEqual({
+      preferredProvider: 'aws',
+      allowedProviders: 'any',
+      productionGradeRequired: true,
+    });
+    expect(parsed.architecture.forbiddenUnlessJustified).toEqual([
+      'kubernetes',
+      'microservices',
+      'multi-region',
+    ]);
+    expect(parsed.excludedDomains).toBe('unknown');
+  });
+
+  it.each([
+    ['a removed field (teamSize)', { teamSize: 3 }],
+    ['a negative budget', { limits: { buildBudgetUsd: -1 } }],
+    ['a zero deadline', { limits: { launchDeadlineWeeks: 0 } }],
+    ['an unknown product type', { productTypes: { allowed: ['desktop'] } }],
+    ['a sandbox-only hosting setting', { hosting: { productionGradeRequired: false } }],
+    ['an invalid provider id', { hosting: { preferredProvider: 'AWS Cloud!' } }],
+  ])('rejects %s', (_name, input) => {
+    expect(platformConstraintsSchema.safeParse(input).success).toBe(false);
+  });
 });
 
 describe('approvalSchema', () => {

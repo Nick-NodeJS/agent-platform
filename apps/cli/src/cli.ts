@@ -10,7 +10,8 @@ import type { CliContext } from './context.js';
 
 export const USAGE = `Usage: agent-platform <command>
 
-  start --goal <text> [--run-id <id>] [--budget-usd <n>] [--team-size <n>] [--timeline-weeks <n>] [--notes <text>]
+  start --goal <text> [--run-id <id>] [--constraints-file <path>] [--build-budget-usd <n>]
+        [--monthly-run-cap-usd <n>] [--launch-deadline-weeks <n>] [--notes <text>]
   status <runId>
   approve <runId> [--reason <text>] [--ttl-minutes <n>]     (signed with your approval signer key)
   reject <runId> [--reason <text>] [--ttl-minutes <n>]

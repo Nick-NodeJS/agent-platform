@@ -3,12 +3,13 @@ import {
   DEFAULT_AGENT_LEASE_TTL_MS,
   approvalEnvelopeSchema,
   businessEvaluationSchema,
+  enforceConstraintChecks,
   researchProposalSchema,
   sameArtifacts,
   type AgentExecutor,
   type ApprovalEnvelope,
   type ArtifactRef,
-  type ResourceConstraints,
+  type PlatformConstraints,
   type Result,
   type ReviewGate,
   type Status,
@@ -160,7 +161,7 @@ export function createActivities(deps: ActivityDeps) {
     async createTaskAndRun(args: {
       runId: string;
       goal: string;
-      constraints: ResourceConstraints;
+      constraints: PlatformConstraints;
     }): Promise<{ taskId: string; taskLocation: string }> {
       const { runId, goal, constraints } = args;
       await assertRunNotDecided(runId);
@@ -201,7 +202,7 @@ export function createActivities(deps: ActivityDeps) {
       runId: string;
       taskId: string;
       goal: string;
-      constraints: ResourceConstraints;
+      constraints: PlatformConstraints;
     }): Promise<{ resultId: string; title: string; reused: boolean }> {
       const res = await runAgentStage(stageDeps, {
         runId: args.runId,
@@ -219,12 +220,13 @@ export function createActivities(deps: ActivityDeps) {
     async runBusinessOwner(args: {
       runId: string;
       taskId: string;
-      constraints: ResourceConstraints;
+      constraints: PlatformConstraints;
     }): Promise<{ resultId: string; recommendation: string; reused: boolean }> {
       const stored = await repo.getResult(researchResultId(args.runId));
       if (!stored) {
         throw ApplicationFailure.nonRetryable('research proposal result not found', 'MissingInput');
       }
+      const proposal = researchProposalSchema.parse(stored.payload);
       const res = await runAgentStage(stageDeps, {
         runId: args.runId,
         taskId: args.taskId,
@@ -232,11 +234,14 @@ export function createActivities(deps: ActivityDeps) {
         stage: EVALUATION_STAGE,
         kind: 'business-evaluation',
         resultId: evaluationResultId(args.runId),
-        input: {
-          proposal: researchProposalSchema.parse(stored.payload),
-          constraints: args.constraints,
-        },
-        validateOutput: (output) => businessEvaluationSchema.parse(output),
+        input: { proposal, constraints: args.constraints },
+        // Whatever checks or recommendation the executor returned, the platform recomputes the limit checks in code.
+        validateOutput: (output) =>
+          enforceConstraintChecks(
+            businessEvaluationSchema.parse(output),
+            proposal,
+            args.constraints,
+          ),
       });
       return {
         resultId: res.resultId,

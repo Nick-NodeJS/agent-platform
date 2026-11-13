@@ -11,6 +11,7 @@ whose implementation is pending**.
 | [0002](0002-temporal-postgres-local-task-adapter.md) | Temporal plus PostgreSQL; local task adapter                     | Accepted (implemented)                     |
 | [0003](0003-signed-approval-gates.md)                | Signed approval gates and explicit trust boundaries              | Accepted (implemented)                     |
 | [0004](0004-linux-flock-local-file-backend.md)       | Linux kernel `flock` for the local file backend                  | Accepted (implemented)                     |
+| [0006](0006-limits-and-two-human-gates.md)           | Platform-enforced limits and two human gates                     | Accepted direction; partly implemented     |
 | [0005](0005-direct-api-research-first.md)            | Local sequential direct-API research first; OpenHands for coding | Accepted direction; implementation pending |
 
 When to write one: a change to behavior, contracts, persistence, permissions or deployment that **changes a decision** needs a new ADR

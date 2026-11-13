@@ -4,18 +4,45 @@ import {
   WorkflowIdConflictPolicy,
   WorkflowIdReusePolicy,
 } from '@temporalio/client';
-import {
-  WORKFLOW_NAME,
-  idSchema,
-  resourceConstraintsSchema,
-  type ResearchProposalInput,
-} from '@platform/contracts';
+import { WORKFLOW_NAME, idSchema, type ResearchProposalInput } from '@platform/contracts';
+import { loadPlatformConstraints } from '@platform/contracts/node';
+import { resolveRepositoryPath } from '@platform/integrations';
 import { optionalNumber, type ParsedArgs } from '../args.js';
 import { CliError, openTemporal, temporalUiUrl, type CliContext } from '../context.js';
 
 const RUN_ID_RANDOM_CHARS = 12;
 
+const DEFAULT_CONSTRAINTS_FILE = 'config/platform-constraints.json';
+
+const STARTUP_FLAGS = new Set([
+  'goal',
+  'run-id',
+  'constraints-file',
+  'build-budget-usd',
+  'monthly-run-cap-usd',
+  'launch-deadline-weeks',
+  'notes',
+]);
+
+/** Flags from earlier versions get a pointer instead of being silently ignored. */
+const RENAMED_FLAGS: Record<string, string> = {
+  'budget-usd': 'use --build-budget-usd',
+  'timeline-weeks': 'use --launch-deadline-weeks',
+  'team-size': 'it was removed (the team is the agent roles; you only approve)',
+};
+
+function rejectUnknownFlags(flags: Record<string, string>): void {
+  for (const name of Object.keys(flags)) {
+    if (!STARTUP_FLAGS.has(name)) {
+      throw new CliError(
+        `unknown option --${name}${RENAMED_FLAGS[name] ? `: ${RENAMED_FLAGS[name]}` : ''}`,
+      );
+    }
+  }
+}
+
 export async function startCommand(ctx: CliContext, { flags }: ParsedArgs): Promise<void> {
+  rejectUnknownFlags(flags);
   const goal = flags['goal'];
   if (!goal) {
     throw new CliError('--goal is required');
@@ -23,13 +50,23 @@ export async function startCommand(ctx: CliContext, { flags }: ParsedArgs): Prom
   const runId = idSchema.parse(
     flags['run-id'] ?? `run-${randomUUID().slice(0, RUN_ID_RANDOM_CHARS)}`,
   );
-  // Constraints that are not supplied stay 'unknown' (the schema default); they are never guessed.
-  const constraints = resourceConstraintsSchema.parse({
-    budgetUsd: optionalNumber(flags['budget-usd'], 'budget-usd'),
-    teamSize: optionalNumber(flags['team-size'], 'team-size'),
-    timelineWeeks: optionalNumber(flags['timeline-weeks'], 'timeline-weeks'),
-    notes: flags['notes'],
-  });
+  // The constraints file supplies the limits; flags override single values. Unset values stay 'unknown', never guessed.
+  const constraintsFile = resolveRepositoryPath(
+    flags['constraints-file'] ?? DEFAULT_CONSTRAINTS_FILE,
+  );
+  let constraints;
+  try {
+    constraints = loadPlatformConstraints(constraintsFile, {
+      buildBudgetUsd: optionalNumber(flags['build-budget-usd'], 'build-budget-usd'),
+      monthlyRunCapUsd: optionalNumber(flags['monthly-run-cap-usd'], 'monthly-run-cap-usd'),
+      launchDeadlineWeeks: optionalNumber(flags['launch-deadline-weeks'], 'launch-deadline-weeks'),
+      notes: flags['notes'],
+    });
+  } catch (error) {
+    throw new CliError(
+      `cannot use constraints file ${constraintsFile}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   const { client, config, connection } = await openTemporal(ctx);
   try {
     const input: ResearchProposalInput = { runId, goal, constraints };

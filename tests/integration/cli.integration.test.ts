@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { chmod, mkdir, rm, stat } from 'node:fs/promises';
+import { z } from 'zod';
+import { chmod, mkdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { platformConstraintsSchema } from '@platform/contracts';
 import { runCli } from '../../apps/cli/src/cli.js';
 import {
   CountingExecutor,
@@ -76,8 +78,14 @@ describe('CLI commands against live Temporal + Postgres', () => {
     expect((await cli(['frobnicate'])).code).toBe(1);
     expect((await cli(['start', '--goal'])).err).toContain('missing value for --goal');
     expect((await cli(['start'])).err).toContain('--goal is required');
-    expect((await cli(['start', '--goal', 'g', '--budget-usd', 'lots'])).err).toContain(
-      'budget-usd must be a number',
+    expect((await cli(['start', '--goal', 'g', '--build-budget-usd', 'lots'])).err).toContain(
+      'build-budget-usd must be a number',
+    );
+    expect((await cli(['start', '--goal', 'g', '--team-size', '2'])).err).toContain(
+      '--team-size: it was removed',
+    );
+    expect((await cli(['start', '--goal', 'g', '--budget-usd', '5'])).err).toContain(
+      'use --build-budget-usd',
     );
     expect((await cli(['status'])).err).toContain('runId required');
     expect((await cli(['status', '../escape'])).code).toBe(1);
@@ -114,12 +122,10 @@ describe('CLI commands against live Temporal + Postgres', () => {
       'CLI goal',
       '--run-id',
       runId,
-      '--budget-usd',
-      '100',
-      '--team-size',
-      '2',
-      '--timeline-weeks',
-      '4',
+      '--build-budget-usd',
+      '40',
+      '--launch-deadline-weeks',
+      '3',
       '--notes',
       'n',
     ]);
@@ -179,6 +185,64 @@ describe('CLI commands against live Temporal + Postgres', () => {
 
     const rejected = await cli(['reject', runId, '--reason', 'no']);
     expect(rejected.out).toContain('final status: REJECTED');
+  });
+
+  it('start applies the constraints file, lets flags override it, and the platform flags a proposal that breaks the limits', async () => {
+    const file = path.join(env.keyDir, 'constraints.json');
+    await writeFile(
+      file,
+      JSON.stringify({ limits: { buildBudgetUsd: 12, launchDeadlineWeeks: 6 } }),
+    );
+    const runId = newRunId('cli');
+    startedRuns.push(runId);
+
+    const started = await cli([
+      'start',
+      '--goal',
+      'limits goal',
+      '--run-id',
+      runId,
+      '--constraints-file',
+      file,
+      '--monthly-run-cap-usd',
+      '9',
+    ]);
+    expect(started.code).toBe(0);
+    await waitForGate(env, runId);
+
+    const stored = await env.db.query('SELECT constraints FROM runs WHERE run_id=$1', [runId]);
+    const constraints = platformConstraintsSchema.parse(
+      z.object({ constraints: z.unknown() }).parse(stored.rows[0]).constraints,
+    );
+    expect(constraints.limits).toMatchObject({
+      buildBudgetUsd: 12,
+      monthlyRunCapUsd: 9,
+      launchDeadlineWeeks: 6,
+      minimumMonthlyMarginUsd: 'unknown',
+    });
+    // The fictional proposal costs 30 to build, over the 12 limit: the platform's check fails and the owner does not proceed.
+    const status = await cli(['status', runId]);
+    expect(status.out).toContain('"recommendation":"do-not-proceed"');
+    expect(status.out).toContain('"rule":"build-budget","status":"fail"');
+  });
+
+  it('start refuses an unusable constraints file instead of falling back to defaults', async () => {
+    const broken = path.join(env.keyDir, 'broken-constraints.json');
+    await writeFile(broken, '{"limits":{"buildBudgetUsd":-5}}');
+
+    const invalid = await cli(['start', '--goal', 'g', '--constraints-file', broken]);
+    const missing = await cli([
+      'start',
+      '--goal',
+      'g',
+      '--constraints-file',
+      path.join(env.keyDir, 'none.json'),
+    ]);
+
+    expect(invalid.code).toBe(1);
+    expect(invalid.err).toContain('cannot use constraints file');
+    expect(missing.code).toBe(1);
+    expect(missing.err).toContain('cannot use constraints file');
   });
 
   it('says so when the task file cannot be found, instead of silently showing no results', async () => {

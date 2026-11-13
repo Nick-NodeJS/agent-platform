@@ -1,9 +1,21 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { ApplicationFailure } from '@temporalio/client';
 import { MockAgentExecutor } from '@platform/integrations';
+import {
+  platformConstraintsSchema,
+  type AgentExecutor,
+  type AgentRoleIO,
+  type AgentRunRequest,
+  type AgentRunResponse,
+  type ExecutableRole,
+} from '@platform/contracts';
 import { RunRepository } from '@platform/persistence';
 import { digestPayload } from '@platform/contracts/node';
-import type { ApprovalEnvelope, ReviewGate } from '@platform/contracts';
+import {
+  businessEvaluationSchema,
+  type ApprovalEnvelope,
+  type ReviewGate,
+} from '@platform/contracts';
 import {
   createActivities,
   DECISION_CONFLICT,
@@ -16,6 +28,31 @@ import { constraints, createEnv, newRunId, signForGate, type Env } from './harne
 class UnavailableDecisionRepo extends RunRepository {
   override async recordDecision(): ReturnType<RunRepository['recordDecision']> {
     throw new Error('injected: database unavailable');
+  }
+}
+
+type RoleHandlers = {
+  [R in ExecutableRole]: (request: AgentRunRequest<R>) => Promise<AgentRoleIO[R]['output']>;
+};
+
+/** An executor whose business owner always says "proceed" and claims every check passed (an untrusted model). */
+class OptimisticOwnerExecutor implements AgentExecutor {
+  private readonly mock = new MockAgentExecutor();
+  private readonly handlers: RoleHandlers = {
+    researcher: async (request) => (await this.mock.run(request)).output,
+    'business-owner': async (request) => ({
+      ...(await this.mock.run(request)).output,
+      recommendation: 'proceed',
+      rationale: 'Great idea.',
+      constraintChecks: [{ rule: 'everything', status: 'pass', detail: 'trust me' }],
+    }),
+  };
+
+  async run<R extends ExecutableRole>(
+    request: AgentRunRequest<R>,
+  ): Promise<AgentRunResponse<AgentRoleIO[R]['output']>> {
+    const handler: RoleHandlers[R] = this.handlers[request.role];
+    return { output: await handler(request), usage: { costUsd: 0, steps: 1 }, executedBy: 'mock' };
   }
 }
 
@@ -176,5 +213,27 @@ describe('Activities against Postgres and task files', () => {
       digestPayload(payload),
       digestPayload(payload),
     ]);
+  });
+
+  it('recomputes the limit checks in code and overrides a model that says "proceed" for a proposal over budget', async () => {
+    const acts = createActivities({
+      repo: env.repo,
+      tasks: env.tasks,
+      executor: new OptimisticOwnerExecutor(),
+      trustedSignersFile: env.trustedFile,
+    });
+    const tight = platformConstraintsSchema.parse({ limits: { buildBudgetUsd: 10 } });
+    const runId = newRunId('limits');
+    const { taskId } = await acts.createTaskAndRun({ runId, goal: GOAL, constraints: tight });
+    await acts.runResearcher({ runId, taskId, goal: GOAL, constraints: tight });
+
+    await acts.runBusinessOwner({ runId, taskId, constraints: tight });
+
+    const stored = await env.repo.getResult(`${runId}-business-evaluation`);
+    const evaluation = businessEvaluationSchema.parse(stored?.payload);
+    expect(evaluation.recommendation).toBe('do-not-proceed');
+    expect(evaluation.rationale).toContain('Platform override: failed checks: build-budget');
+    expect(evaluation.constraintChecks.map((check) => check.rule)).not.toContain('everything');
+    expect(evaluation.isHumanApproval).toBe(false);
   });
 });

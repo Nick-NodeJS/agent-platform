@@ -1,12 +1,6 @@
-import type {
-  Approval,
-  BusinessEvaluation,
-  ResearchProposal,
-  ResourceConstraints,
-  Result,
-  Status,
-  Task,
-} from './records.js';
+import type { PlatformConstraints } from './constraints.js';
+import type { Approval, Result, Status, Task } from './records.js';
+import type { BusinessEvaluation, ResearchProposal } from './research.js';
 
 export interface TaskStore {
   createTask(task: Task): Promise<Task>;
@@ -25,12 +19,12 @@ export class ExecutorNotStartedError extends Error {}
 
 export interface ResearcherInput {
   goal: string;
-  constraints: ResourceConstraints;
+  constraints: PlatformConstraints;
 }
 
 export interface BusinessOwnerInput {
   proposal: ResearchProposal;
-  constraints: ResourceConstraints;
+  constraints: PlatformConstraints;
 }
 
 /** Input and output types of every role an executor can run. Add a role here when it gets a real stage. */

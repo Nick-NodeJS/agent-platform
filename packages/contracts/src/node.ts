@@ -19,6 +19,7 @@ import {
   type ApprovalPayload,
   type ReviewGate,
 } from './approval.js';
+import { platformConstraintsSchema, type PlatformConstraints } from './constraints.js';
 import { idSchema } from './ids.js';
 
 export const sha256Hex = (data: string): string => createHash('sha256').update(data).digest('hex');
@@ -150,4 +151,32 @@ export function verifyApproval(
     keyId: signer.keyId,
     envelopeDigest: digestPayload({ payload, signature }),
   };
+}
+
+export interface ConstraintOverrides {
+  buildBudgetUsd?: number | undefined;
+  monthlyRunCapUsd?: number | undefined;
+  launchDeadlineWeeks?: number | undefined;
+  notes?: string | undefined;
+}
+
+/** Reads and validates a constraints file; command-line overrides win over the file. Unset values stay `unknown`. */
+export function loadPlatformConstraints(
+  file: string,
+  overrides: ConstraintOverrides = {},
+): PlatformConstraints {
+  const raw: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  const base = platformConstraintsSchema.parse(raw);
+  const limitOverrides = Object.fromEntries(
+    Object.entries({
+      buildBudgetUsd: overrides.buildBudgetUsd,
+      monthlyRunCapUsd: overrides.monthlyRunCapUsd,
+      launchDeadlineWeeks: overrides.launchDeadlineWeeks,
+    }).filter(([, value]) => value !== undefined),
+  );
+  return platformConstraintsSchema.parse({
+    ...base,
+    limits: { ...base.limits, ...limitOverrides },
+    ...(overrides.notes === undefined ? {} : { notes: overrides.notes }),
+  });
 }

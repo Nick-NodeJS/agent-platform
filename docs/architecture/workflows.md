@@ -7,15 +7,15 @@ The only implemented workflow is `researchProposalWorkflow`
 
 ## Contract
 
-| Item                            | Value                                                                                                                                                            |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Workflow ID                     | The run ID, chosen by the client (`pnpm cli start --run-id`, default `run-<random>`). Task ID is `task-<runId>`                                                  |
-| Input (`ResearchProposalInput`) | `runId`, `goal`, `constraints` (`budgetUsd`, `teamSize`, `timelineWeeks`, `notes`; each a value or the literal `'unknown'`, never guessed)                       |
-| Output (`WorkflowStatus`)       | `status`, `stages[]` (timeline), `resultIds`, `gate`, `decision`; also returned by the Query                                                                     |
-| Query `getStatus`               | Read-only snapshot of the output above; `gate` is present only once the review gate is open                                                                      |
-| Update `submitDecision`         | Takes one signed approval envelope; validated, verified, then acknowledged with `DecisionAck`. Names: `DECISION_UPDATE`, `STATUS_QUERY` in `@platform/contracts` |
-| Business statuses               | `CREATED`, `RESEARCHING`, `EVALUATING`, `WAITING_FOR_HUMAN_APPROVAL`, `APPROVED`, `REJECTED` (`STATUSES` in `records.ts`)                                        |
-| Task queue                      | `TASK_QUEUE` (default `agent-platform`)                                                                                                                          |
+| Item                            | Value                                                                                                                                                                                                      |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Workflow ID                     | The run ID, chosen by the client (`pnpm cli start --run-id`, default `run-<random>`). Task ID is `task-<runId>`                                                                                            |
+| Input (`ResearchProposalInput`) | `runId`, `goal`, `constraints` (`PlatformConstraints`: limits, hosting, architecture and product-type rules from the [constraints file](../research-spec.md); unset limits are `'unknown'`, never guessed) |
+| Output (`WorkflowStatus`)       | `status`, `stages[]` (timeline), `resultIds`, `gate`, `decision`; also returned by the Query                                                                                                               |
+| Query `getStatus`               | Read-only snapshot of the output above; `gate` is present only once the review gate is open                                                                                                                |
+| Update `submitDecision`         | Takes one signed approval envelope; validated, verified, then acknowledged with `DecisionAck`. Names: `DECISION_UPDATE`, `STATUS_QUERY` in `@platform/contracts`                                           |
+| Business statuses               | `CREATED`, `RESEARCHING`, `EVALUATING`, `WAITING_FOR_HUMAN_APPROVAL`, `APPROVED`, `REJECTED` (`STATUSES` in `records.ts`)                                                                                  |
+| Task queue                      | `TASK_QUEUE` (default `agent-platform`)                                                                                                                                                                    |
 
 ## Implemented state machine
 
@@ -154,7 +154,7 @@ Prerequisites (Docker stack, migrations, worker, one-time `approval-keygen` and 
 path was set.
 
 ```sh
-pnpm cli start --goal "Find a small B2C product idea" --run-id run-demo-1 --budget-usd 500
+pnpm cli start --goal "Find a small B2C product idea" --run-id run-demo-1 --build-budget-usd 40
 pnpm cli status run-demo-1                    # waits at WAITING_FOR_HUMAN_APPROVAL; shows both mock results and the gate
 cat .task-data/tasks/task-run-demo-1.md       # human-readable projection (JSON is task-run-demo-1.json)
 pnpm cli approve run-demo-1 --reason "demo"   # or: pnpm cli reject run-demo-1 --reason "demo"
@@ -162,7 +162,7 @@ pnpm cli status run-demo-1                    # APPROVED (or REJECTED) with the 
 pnpm cli executions run-demo-1                # two executions, attempts=1, cost 0
 ```
 
-Results are fictional placeholders (`fictionalExample: true`). The Temporal UI link printed by `start` shows the history.
+Results are fictional placeholders (`fictionalExample: true`). The business-owner result lists `constraintChecks`; if the proposal broke a limit, its recommendation is `do-not-proceed` and the run still waits for your decision (automatic stop is not implemented yet, see the [research spec](../research-spec.md)). The Temporal UI link printed by `start` shows the history.
 
 ## Restart, replay and old histories
 

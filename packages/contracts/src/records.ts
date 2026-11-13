@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { platformConstraintsSchema } from './constraints.js';
 import { idSchema, timestampSchema } from './ids.js';
 
 export const STATUSES = [
@@ -12,30 +13,13 @@ export const STATUSES = [
 export const statusSchema = z.enum(STATUSES);
 export type Status = z.infer<typeof statusSchema>;
 
-const orUnknown = <T extends z.ZodTypeAny>(schema: T) =>
-  z
-    .union([schema, z.literal('unknown')])
-    .optional()
-    .transform((value) => value ?? ('unknown' as const));
-
-/** Real-world constraints are never guessed: anything not supplied is the literal 'unknown'. */
-export const resourceConstraintsSchema = z
-  .object({
-    budgetUsd: orUnknown(z.number().nonnegative()),
-    teamSize: orUnknown(z.number().int().nonnegative()),
-    timelineWeeks: orUnknown(z.number().positive()),
-    notes: orUnknown(z.string()),
-  })
-  .strict();
-export type ResourceConstraints = z.infer<typeof resourceConstraintsSchema>;
-
 export const runSchema = z
   .object({
     runId: idSchema,
     workflowId: idSchema,
     taskId: idSchema,
     goal: z.string().min(1),
-    constraints: resourceConstraintsSchema,
+    constraints: platformConstraintsSchema,
     status: statusSchema,
     createdAt: timestampSchema,
     updatedAt: timestampSchema,
@@ -108,24 +92,3 @@ export const executionEventSchema = z
   })
   .strict();
 export type ExecutionEvent = z.infer<typeof executionEventSchema>;
-
-export const researchProposalSchema = z
-  .object({
-    fictionalExample: z.literal(true),
-    title: z.string(),
-    summary: z.string(),
-    assumptions: z.array(z.string()),
-    unknowns: z.array(z.string()),
-  })
-  .strict();
-export type ResearchProposal = z.infer<typeof researchProposalSchema>;
-
-export const businessEvaluationSchema = z
-  .object({
-    recommendation: z.enum(['proceed', 'do-not-proceed']),
-    score: z.number().min(0).max(10),
-    rationale: z.string(),
-    isHumanApproval: z.literal(false),
-  })
-  .strict();
-export type BusinessEvaluation = z.infer<typeof businessEvaluationSchema>;

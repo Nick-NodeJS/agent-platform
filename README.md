@@ -49,7 +49,7 @@ The private signer file (`signer.json`) belongs to the trusted human CLI only: d
 ## Run the mock workflow
 
 ```sh
-pnpm cli start --goal "Find a small B2C product idea" --run-id run-demo-1 --budget-usd 500 --team-size 2
+pnpm cli start --goal "Find a small B2C product idea" --run-id run-demo-1 --build-budget-usd 40
 pnpm cli status run-demo-1                       # pauses at WAITING_FOR_HUMAN_APPROVAL and shows the review gate
 pnpm cli approve run-demo-1 --reason "looks fine"   # or: pnpm cli reject run-demo-1 --reason "no"
 pnpm cli status run-demo-1
@@ -67,7 +67,7 @@ pnpm cli executions run-demo-1
 pnpm cli reconcile run-demo-1 researcher --confirm-no-external-run   # operator decision; then start again with the same --run-id
 ```
 
-Omitted constraints (`--budget-usd`, `--team-size`, `--timeline-weeks`, `--notes`) are recorded as `unknown`.
+Limits come from [`config/platform-constraints.json`](config/platform-constraints.json) (build budget 50 USD, monthly run cap 50 USD, 4 weeks, API-first); `--constraints-file`, `--build-budget-usd`, `--monthly-run-cap-usd`, `--launch-deadline-weeks` and `--notes` override them, and anything unset is `unknown`. See the [research spec](docs/research-spec.md).
 Task files are written to `.task-data/tasks/` (git-ignored). Execution history: Temporal UI.
 
 ## Commands

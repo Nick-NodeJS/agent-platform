@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "limits": {
+    "buildBudgetUsd": 50,
+    "monthlyRunCapUsd": 50,
+    "launchDeadlineWeeks": 4,
+    "minimumMonthlyMarginUsd": "unknown",
+    "agentSpend": "unknown"
+  },
+  "hosting": {
+    "preferredProvider": "aws",
+    "allowedProviders": "any",
+    "productionGradeRequired": true
+  },
+  "architecture": {
+    "preferSingleDeployable": true,
+    "maxDeployableUnitsWithoutJustification": 2,
+    "forbiddenUnlessJustified": ["kubernetes", "microservices", "multi-region"]
+  },
+  "productTypes": {
+    "allowed": ["api", "web", "mobile"],
+    "preferenceOrder": ["api", "web", "mobile"]
+  },
+  "excludedDomains": "unknown",
+  "notes": "Owner-agreed limits (2026-11-13): build budget and monthly run cap of 50 USD each, launch within 4 weeks, API first. Agent compute is a separate allowance (unknown until Step 3). Mobile is allowed but ranked last: store fees may not fit the budget."
+}

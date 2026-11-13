@@ -25,6 +25,7 @@ import {
   DECISION_UPDATE,
   approvalSchema,
   decisionAckSchema,
+  platformConstraintsSchema,
   resultSchema,
   taskSchema,
   workflowStatusSchema,
@@ -35,7 +36,7 @@ import {
   type ExecutableRole,
   type ApprovalPayload,
   type WorkflowStatus,
-  type ResourceConstraints,
+  type PlatformConstraints,
   type ReviewGate,
 } from '@platform/contracts';
 import {
@@ -206,12 +207,8 @@ export async function startWorker(
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export const constraints: ResourceConstraints = {
-  budgetUsd: 'unknown',
-  teamSize: 'unknown',
-  timelineWeeks: 'unknown',
-  notes: 'unknown',
-};
+/** Defaults only: every limit is 'unknown', so no limit check can fail. */
+export const constraints: PlatformConstraints = platformConstraintsSchema.parse({});
 
 export const newRunId = (prefix = 'it') => `${prefix}-${randomUUID().slice(0, 10)}`;
 

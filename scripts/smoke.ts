@@ -162,8 +162,8 @@ async function main(): Promise<void> {
       'Smoke test goal (fictional)',
       '--run-id',
       approveId,
-      '--budget-usd',
-      '100',
+      '--build-budget-usd',
+      '40',
     );
     await cli('start', '--goal', 'Smoke test goal 2 (fictional)', '--run-id', rejectId);
     await waitFor(approveId, WAITING);
