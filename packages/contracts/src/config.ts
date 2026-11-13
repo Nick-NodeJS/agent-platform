@@ -4,7 +4,8 @@ import { MIN_AGENT_LEASE_TTL_MS } from './execution-limits.js';
 export const DEFAULT_AGENT_LEASE_TTL_MS = 120_000;
 
 const baseSchema = z.object({
-  EXECUTION_MODE: z.enum(['mock', 'openhands']).default('mock'),
+  EXECUTION_MODE: z.enum(['mock', 'openai', 'openhands']).default('mock'),
+  MODEL_PROFILES_FILE: z.string().default('config/model-profiles.json'),
   TEMPORAL_ADDRESS: z.string().default('127.0.0.1:7233'),
   TEMPORAL_NAMESPACE: z.string().default('default'),
   TASK_QUEUE: z.string().default('agent-platform'),

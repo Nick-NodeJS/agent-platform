@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "provider": "openai",
+  "apiKeyEnvVar": "OPENAI_API_KEY",
+  "roles": {
+    "researcher": {
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "medium",
+      "maxOutputTokens": 24000,
+      "maxToolCalls": 12,
+      "searchContextSize": "medium",
+      "tools": ["web_search"],
+      "timeoutMs": 420000
+    },
+    "business-owner": {
+      "model": "gpt-6.1-sol",
+      "reasoningEffort": "medium",
+      "maxOutputTokens": 12000,
+      "maxToolCalls": 0,
+      "searchContextSize": "low",
+      "tools": [],
+      "timeoutMs": 240000
+    }
+  },
+  "pricing": {
+    "gpt-6.1-sol": {
+      "inputPerMTokUsd": 2,
+      "cachedInputPerMTokUsd": 0.1,
+      "outputPerMTokUsd": 10,
+      "webSearchPerCallUsd": 0.01,
+      "longContextThresholdTokens": 272000,
+      "longContextInputMultiplier": 2,
+      "longContextOutputMultiplier": 1.5,
+      "asOf": "2026-11-13"
+    }
+  },
+  "spend": {
+    "minRemainingBudgetUsd": 0.5,
+    "assumedUncertainCostUsd": 1
+  }
+}

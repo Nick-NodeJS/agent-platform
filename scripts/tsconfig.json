@@ -5,5 +5,5 @@
     "rootDir": ".",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "include": ["smoke.ts"]
+  "include": ["smoke.ts", "openai-live-check.ts"]
 }

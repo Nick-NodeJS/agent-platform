@@ -3,11 +3,21 @@ import { existsSync } from 'node:fs';
 import pino from 'pino';
 import { NativeConnection, Worker } from '@temporalio/worker';
 import { loadConfig, MAX_HEARTBEAT_THROTTLE_MS } from '@platform/contracts';
-import { createExecutor, LocalTaskStore, resolveTaskStoreDir } from '@platform/integrations';
+import { loadModelProfiles } from '@platform/contracts/node';
+import {
+  createExecutor,
+  LocalTaskStore,
+  resolveRepositoryPath,
+  resolveTaskStoreDir,
+} from '@platform/integrations';
 import { createPool, RunRepository } from '@platform/persistence';
 import { createActivities } from './activities.js';
 import { temporalActivityRuntime } from './temporal-activity-runtime.js';
-import { assertNoPrivateSigningKey, assertSupportedExecutionMode } from './worker-env.js';
+import {
+  assertNoPrivateSigningKey,
+  assertSupportedExecutionMode,
+  readProviderApiKey,
+} from './worker-env.js';
 
 if (existsSync('.env')) {
   process.loadEnvFile('.env');
@@ -26,11 +36,23 @@ if (!config.APPROVAL_TRUSTED_SIGNERS_FILE) {
   );
 }
 
+// Real execution: profiles (models, ceilings, prices) from a file, the API key only from the environment. The
+// spending guard is switched on for every paid executor; the mock costs nothing and needs neither.
+const profiles =
+  config.EXECUTION_MODE === 'openai'
+    ? loadModelProfiles(resolveRepositoryPath(config.MODEL_PROFILES_FILE))
+    : undefined;
+const executor = createExecutor(
+  config.EXECUTION_MODE,
+  profiles && { apiKey: readProviderApiKey(profiles.apiKeyEnvVar, process.env), profiles },
+);
+
 const db = createPool(config.DATABASE_URL);
 const activities = createActivities({
   repo: new RunRepository(db),
   tasks: new LocalTaskStore({ rootDir: resolveTaskStoreDir(config.TASK_STORE_DIR) }),
-  executor: createExecutor(config.EXECUTION_MODE),
+  executor,
+  ...(profiles && { spendPolicy: profiles.spend }),
   trustedSignersFile: config.APPROVAL_TRUSTED_SIGNERS_FILE || undefined,
   leaseTtlMs: config.AGENT_LEASE_TTL_MS,
   runtime: temporalActivityRuntime,

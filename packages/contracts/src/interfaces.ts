@@ -48,7 +48,8 @@ export interface AgentRunRequest<R extends ExecutableRole = ExecutableRole> {
 
 export interface AgentRunResponse<O> {
   output: O;
-  usage: { costUsd: number; steps: number };
+  /** `details` (model, tokens, durations, ids) is logged with the execution; it never contains secrets. */
+  usage: { costUsd: number; steps: number; details?: Record<string, string | number> };
   executedBy: 'mock' | 'agent';
 }
 

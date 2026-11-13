@@ -2,8 +2,8 @@ import { accessSync, constants, existsSync } from 'node:fs';
 import path from 'node:path';
 import net from 'node:net';
 import { loadBaseConfig } from '@platform/contracts';
-import { loadTrustedSigners } from '@platform/contracts/node';
-import { resolveTaskStoreDir } from '@platform/integrations';
+import { loadModelProfiles, loadTrustedSigners } from '@platform/contracts/node';
+import { resolveRepositoryPath, resolveTaskStoreDir } from '@platform/integrations';
 import { createPool } from '@platform/persistence';
 import { signerFilePath, type CliContext } from '../context.js';
 
@@ -45,6 +45,33 @@ function checkTaskStoreDirectory(configured: string): Check {
       ok: false,
       detail: `${directory}: ${existing} is not writable`,
     };
+  }
+}
+
+/** Only for `openai`: the profiles file must be valid and the key variable set (its name is shown, never its value). */
+function checkRealExecution(mode: string, profilesFile: string, env: NodeJS.ProcessEnv): Check[] {
+  if (mode !== 'openai') {
+    return [];
+  }
+  const file = resolveRepositoryPath(profilesFile);
+  try {
+    const profiles = loadModelProfiles(file);
+    return [
+      { name: 'model profiles valid', ok: true, detail: file },
+      {
+        name: `${profiles.apiKeyEnvVar} set`,
+        ok: Boolean(env[profiles.apiKeyEnvVar]),
+        detail: 'the worker needs it in its own environment',
+      },
+    ];
+  } catch (error) {
+    return [
+      {
+        name: 'model profiles valid',
+        ok: false,
+        detail: `${file}: ${error instanceof Error ? error.message : String(error)}`,
+      },
+    ];
   }
 }
 
@@ -102,12 +129,13 @@ export async function doctorCommand(ctx: CliContext): Promise<number> {
     },
     {
       name: 'EXECUTION_MODE',
-      ok: config.EXECUTION_MODE === 'mock',
+      ok: config.EXECUTION_MODE !== 'openhands',
       detail:
-        config.EXECUTION_MODE === 'mock'
-          ? 'mock'
-          : `${config.EXECUTION_MODE}: real execution is not implemented, the worker will refuse to start`,
+        config.EXECUTION_MODE === 'openhands'
+          ? 'openhands: not implemented, the worker will refuse to start'
+          : config.EXECUTION_MODE,
     },
+    ...checkRealExecution(config.EXECUTION_MODE, config.MODEL_PROFILES_FILE, ctx.env),
     checkTaskStoreDirectory(config.TASK_STORE_DIR),
     {
       name: 'temporal reachable',

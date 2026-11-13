@@ -25,6 +25,7 @@ import {
 } from '@platform/contracts/node';
 import { DecisionConflictError, type RunRepository } from '@platform/persistence';
 import { runAgentStage, type ActivityRuntime } from './agent-stage.js';
+import type { SpendPolicy } from './spend-guard.js';
 
 export interface ActivityDeps {
   repo: RunRepository;
@@ -37,6 +38,8 @@ export interface ActivityDeps {
   now?: () => Date;
   /** Heartbeat and cancellation of the running Activity; omit outside Temporal. */
   runtime?: ActivityRuntime;
+  /** Enables the spending guard; set it for every paid executor. */
+  spendPolicy?: SpendPolicy;
 }
 
 export const RUN_ALREADY_DECIDED = 'RunAlreadyDecided';
@@ -63,6 +66,7 @@ export function createActivities(deps: ActivityDeps) {
     ...(deps.persistAttempts !== undefined && { persistAttempts: deps.persistAttempts }),
     now,
     ...(deps.runtime && { runtime: deps.runtime }),
+    ...(deps.spendPolicy && { spendPolicy: deps.spendPolicy }),
   };
   const event = (runId: string, eventId: string, type: string, data: Record<string, unknown>) =>
     repo.insertEvent({
@@ -215,6 +219,7 @@ export function createActivities(deps: ActivityDeps) {
         kind: 'research-proposal',
         resultId: researchResultId(args.runId),
         input: { goal: args.goal, constraints: args.constraints },
+        spendLimit: args.constraints.limits.agentSpend,
         validateOutput: (output) => researchProposalSchema.parse(output),
       });
       return { resultId: res.resultId, title: res.output.title, reused: res.reused };
@@ -238,6 +243,7 @@ export function createActivities(deps: ActivityDeps) {
         kind: 'business-evaluation',
         resultId: evaluationResultId(args.runId),
         input: { proposal, constraints: args.constraints },
+        spendLimit: args.constraints.limits.agentSpend,
         // Whatever checks or recommendation the executor returned, the platform recomputes the limit checks in code.
         validateOutput: (output) =>
           enforceConstraintChecks(

@@ -5,6 +5,7 @@ export * from './execution-limits.js';
 export * from './records.js';
 export * from './research.js';
 export * from './interfaces.js';
+export * from './model-profiles.js';
 export * from './config.js';
 export * from './workflow-types.js';
 export * from './approval.js';

@@ -16,12 +16,21 @@ export const providerIdSchema = z.string().regex(/^[a-z][a-z0-9-]{0,39}$/);
 const FORBIDDEN_UNLESS_JUSTIFIED = ['kubernetes', 'microservices', 'multi-region'];
 const MAX_DEPLOYABLE_UNITS_WITHOUT_JUSTIFICATION = 2;
 
+/** USD ceilings for the agents' own model and search usage; real (paid) execution refuses to run without them. */
 const agentSpendSchema = z.union([
   z
-    .object({ unit: z.enum(['usd', 'weekly-allowance']), amount: z.number().nonnegative() })
-    .strict(),
+    .object({
+      unit: z.literal('usd'),
+      perRunUsd: z.number().positive(),
+      perMonthUsd: z.number().positive(),
+    })
+    .strict()
+    .refine((spend) => spend.perRunUsd <= spend.perMonthUsd, {
+      message: 'perRunUsd must not exceed perMonthUsd',
+    }),
   z.literal('unknown'),
 ]);
+export type AgentSpendLimit = z.infer<typeof agentSpendSchema>;
 
 const limitsSchema = z
   .object({
@@ -33,7 +42,7 @@ const limitsSchema = z
     launchDeadlineWeeks: orUnknown(z.number().positive()),
     /** Required monthly revenue minus running cost; 0 means break-even. */
     minimumMonthlyMarginUsd: orUnknown(z.number()),
-    /** The agents' own compute allowance (a USD cap or a weekly allowance); separate from the product budget. */
+    /** The agents' own USD allowance per run and per calendar month (UTC); separate from the product budget. */
     agentSpend: agentSpendSchema.optional().transform((value) => value ?? ('unknown' as const)),
   })
   .strict();

@@ -20,17 +20,17 @@ evaluation is shown by `pnpm cli status` and the human decides. See [ADR 6](deci
 ([`constraints.ts`](../packages/contracts/src/constraints.ts)) and is the default for `pnpm cli start`. Flags override single limits:
 `--constraints-file`, `--build-budget-usd`, `--monthly-run-cap-usd`, `--launch-deadline-weeks`, `--notes`. Anything unset is `unknown`, never guessed.
 
-| Field                            | Meaning                                                                                                                           | Agreed value                                         |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `limits.buildBudgetUsd`          | Total spend to build and launch the product (not the agents' own compute)                                                         | 50                                                   |
-| `limits.monthlyRunCapUsd`        | Recurring monthly running cost cap                                                                                                | 50                                                   |
-| `limits.launchDeadlineWeeks`     | Latest launch, weeks from approval                                                                                                | 4                                                    |
-| `limits.minimumMonthlyMarginUsd` | Required monthly revenue minus running cost (0 = break-even)                                                                      | unknown (to set)                                     |
-| `limits.agentSpend`              | Agents' own allowance, separate from the product budget (`usd` or `weekly-allowance`)                                             | unknown (Step 3)                                     |
-| `hosting`                        | Preferred provider `aws`; any provider allowed; production-grade required (no sandbox/demo setups)                                | as agreed                                            |
-| `architecture`                   | Single deployable preferred; more than 2 deployable units, or kubernetes/microservices/multi-region, need a written justification | **defaults chosen by the assistant, please confirm** |
-| `productTypes`                   | `api`, `web`, `mobile` allowed; preference order api, web, mobile (store fees may not fit the budget)                             | as agreed                                            |
-| `excludedDomains`                | Business domains to avoid                                                                                                         | unknown (to set)                                     |
+| Field                            | Meaning                                                                                                                                                | Agreed value                                         |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- |
+| `limits.buildBudgetUsd`          | Total spend to build and launch the product (not the agents' own compute)                                                                              | 50                                                   |
+| `limits.monthlyRunCapUsd`        | Recurring monthly running cost cap                                                                                                                     | 50                                                   |
+| `limits.launchDeadlineWeeks`     | Latest launch, weeks from approval                                                                                                                     | 4                                                    |
+| `limits.minimumMonthlyMarginUsd` | Required monthly revenue minus running cost (0 = break-even)                                                                                           | unknown (to set)                                     |
+| `limits.agentSpend`              | Agents' own model and search spend in USD per run and per UTC month, separate from the product budget; real (paid) execution refuses to run without it | 3 per run, 20 per month                              |
+| `hosting`                        | Preferred provider `aws`; any provider allowed; production-grade required (no sandbox/demo setups)                                                     | as agreed                                            |
+| `architecture`                   | Single deployable preferred; more than 2 deployable units, or kubernetes/microservices/multi-region, need a written justification                      | **defaults chosen by the assistant, please confirm** |
+| `productTypes`                   | `api`, `web`, `mobile` allowed; preference order api, web, mobile (store fees may not fit the budget)                                                  | as agreed                                            |
+| `excludedDomains`                | Business domains to avoid                                                                                                                              | unknown (to set)                                     |
 
 Team size was removed: the team is the agent roles and the owner only approves.
 
@@ -77,7 +77,14 @@ Before launch, revenue and margin are **assumptions** and are labelled as such. 
 spend) and recommend scale, change or shutdown; spending beyond the limits needs the owner's approval. Profit is a managed metric, not a guarantee. Post-launch
 tracking is planned (Steps 9-12), not implemented.
 
+## Real agents (Step 3, `EXECUTION_MODE=openai`)
+
+Researcher and business owner run on `gpt-6.1-sol` through the OpenAI Responses API ([ADR 7](decisions/0007-openai-executor-and-spend-guard.md)).
+The researcher may use web search (at most 12 calls); the business owner has no tools. Both receive the limits and rules above (but not their own allowance), return strict JSON,
+and are told that web pages are untrusted data. The platform recomputes the limit checks itself, so the model's `proceed` can be overridden. Real spend is guarded and logged as described in the ADR.
+Mock mode stays the default and is free.
+
 ## Not implemented yet
 
-Automatic stop on "do-not-proceed" without a human step; the go-live gate; runtime spend enforcement and agent allowance accounting (Step 3);
-real researcher/business-owner agents (Step 4); demand-test execution and post-launch metrics.
+Automatic stop on "do-not-proceed" without a human step; the go-live gate; real runs exercised against the live API (only a fake provider has been used so far);
+demand-test execution and post-launch metrics; provider-side usage reconciliation (cost is computed from reported usage and a hand-maintained price list).

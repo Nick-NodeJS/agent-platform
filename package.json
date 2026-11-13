@@ -23,6 +23,7 @@
     "build": "tsc -b",
     "test": "tsc -b && vitest run",
     "smoke": "node scripts/dist/smoke.js",
+    "openai:check": "node scripts/dist/openai-live-check.js",
     "test:integration": "tsc -b && vitest run --config vitest.integration.config.ts",
     "test:coverage": "tsc -b && vitest run --config vitest.coverage.config.ts --coverage",
     "verify": "pnpm format:check && pnpm build && pnpm lint && pnpm typecheck"

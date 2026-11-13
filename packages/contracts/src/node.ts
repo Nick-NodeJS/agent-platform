@@ -21,6 +21,7 @@ import {
 } from './approval.js';
 import { platformConstraintsSchema, type PlatformConstraints } from './constraints.js';
 import { idSchema } from './ids.js';
+import { modelProfilesSchema, type ModelProfiles } from './model-profiles.js';
 
 export const sha256Hex = (data: string): string => createHash('sha256').update(data).digest('hex');
 export const digestPayload = (payload: unknown): string => sha256Hex(canonicalJson(payload));
@@ -179,4 +180,9 @@ export function loadPlatformConstraints(
     limits: { ...base.limits, ...limitOverrides },
     ...(overrides.notes === undefined ? {} : { notes: overrides.notes }),
   });
+}
+
+export function loadModelProfiles(file: string): ModelProfiles {
+  const raw: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  return modelProfilesSchema.parse(raw);
 }

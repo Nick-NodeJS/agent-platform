@@ -238,6 +238,21 @@ const isUniqueViolation = (error: unknown): boolean =>
   error instanceof Error && 'code' in error && error.code === UNIQUE_VIOLATION;
 
 /** Canonical records live here. All writes are idempotent or fenced so Activity retries are safe. */
+const spendTotalsRowSchema = z
+  .object({
+    run_usd: z.number(),
+    month_usd: z.number(),
+    run_uncertain: z.number(),
+    month_uncertain: z.number(),
+  })
+  .transform((row) => ({
+    runUsd: row.run_usd,
+    monthUsd: row.month_usd,
+    runUncertain: row.run_uncertain,
+    monthUncertain: row.month_uncertain,
+  }));
+export type SpendTotals = z.infer<typeof spendTotalsRowSchema>;
+
 export class RunRepository {
   constructor(protected readonly db: Db) {}
 
@@ -594,6 +609,8 @@ export class RunRepository {
     executedBy: string;
     costUsd: number;
     steps: number;
+    /** Model, tokens, duration and ids of the call; stored as an `agent.call.completed` event in the same transaction. */
+    callDetails?: Record<string, string | number>;
     result: Result;
   }): Promise<void> {
     const client = await this.db.connect();
@@ -640,6 +657,24 @@ export class RunRepository {
          VALUES ($1,$2,$3,$4,$5,$6, now()) ON CONFLICT DO NOTHING`,
         [args.executionId, row.run_id, row.role, args.costUsd, args.steps, row.attempts],
       );
+      if (args.callDetails) {
+        await client.query(
+          `INSERT INTO execution_events (event_id, run_id, type, data, created_at)
+           VALUES ($1,$2,'agent.call.completed',$3, now()) ON CONFLICT DO NOTHING`,
+          [
+            `${args.executionId}:call`,
+            row.run_id,
+            JSON.stringify({
+              role: row.role,
+              executionId: args.executionId,
+              attempts: row.attempts,
+              costUsd: args.costUsd,
+              steps: args.steps,
+              ...args.callDetails,
+            }),
+          ],
+        );
+      }
       await client.query('COMMIT');
     } catch (e) {
       await client.query('ROLLBACK').catch(() => undefined);
@@ -647,6 +682,22 @@ export class RunRepository {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Spend so far for the guard: recorded costs plus the number of `uncertain` executions (a call that may have been
+   * billed but whose result was not stored). Months are UTC calendar months starting at `monthStart`.
+   */
+  async spendTotals(runId: string, monthStart: Date): Promise<SpendTotals> {
+    const r = await this.db.query(
+      `SELECT
+         (SELECT COALESCE(SUM(cost_usd),0)::float FROM cost_entries WHERE run_id=$1) AS run_usd,
+         (SELECT COALESCE(SUM(cost_usd),0)::float FROM cost_entries WHERE created_at >= $2) AS month_usd,
+         (SELECT COUNT(*)::int FROM agent_executions WHERE run_id=$1 AND state='uncertain') AS run_uncertain,
+         (SELECT COUNT(*)::int FROM agent_executions WHERE state='uncertain' AND updated_at >= $2) AS month_uncertain`,
+      [runId, monthStart],
+    );
+    return spendTotalsRowSchema.parse(r.rows[0]);
   }
 
   async listExecutions(runId: string): Promise<ExecutionRecord[]> {

@@ -233,7 +233,7 @@ describe('loadPlatformConstraints', () => {
       buildBudgetUsd: 50,
       monthlyRunCapUsd: 50,
       launchDeadlineWeeks: 4,
-      agentSpend: 'unknown',
+      agentSpend: { unit: 'usd', perRunUsd: 3, perMonthUsd: 20 },
     });
     expect(constraints.productTypes.preferenceOrder).toEqual(['api', 'web', 'mobile']);
     expect(constraints.hosting.preferredProvider).toBe('aws');

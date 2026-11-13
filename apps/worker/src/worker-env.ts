@@ -13,13 +13,25 @@ export function assertNoPrivateSigningKey(env: NodeJS.ProcessEnv): void {
 }
 
 /**
- * Real agent execution does not exist yet. Starting a worker that would fail at the first agent stage, after the
- * run already reached RESEARCHING, is worse than refusing to start; a mode is never silently replaced by the mock.
+ * `mock` and `openai` are the executable modes. OpenHands is deferred: starting a worker that would fail at the first
+ * agent stage, after the run already reached RESEARCHING, is worse than refusing to start. A mode is never silently
+ * replaced by another one.
  */
 export function assertSupportedExecutionMode(mode: PlatformConfig['EXECUTION_MODE']): void {
-  if (mode !== 'mock') {
+  if (mode === 'openhands') {
     throw new Error(
-      `EXECUTION_MODE=${mode} is not available: real agent execution is not implemented. Set EXECUTION_MODE=mock.`,
+      'EXECUTION_MODE=openhands is not available: OpenHands execution is not implemented. Set EXECUTION_MODE=mock or openai.',
     );
   }
+}
+
+/** Real execution needs its credential in the worker's environment; only the variable NAME is ever reported. */
+export function readProviderApiKey(apiKeyEnvVar: string, env: NodeJS.ProcessEnv): string {
+  const key = env[apiKeyEnvVar];
+  if (!key) {
+    throw new Error(
+      `EXECUTION_MODE=openai needs the API key in the environment variable ${apiKeyEnvVar}, which is not set`,
+    );
+  }
+  return key;
 }

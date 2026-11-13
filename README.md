@@ -70,6 +70,11 @@ pnpm cli reconcile run-demo-1 researcher --confirm-no-external-run   # operator 
 Limits come from [`config/platform-constraints.json`](config/platform-constraints.json) (build budget 50 USD, monthly run cap 50 USD, 4 weeks, API-first); `--constraints-file`, `--build-budget-usd`, `--monthly-run-cap-usd`, `--launch-deadline-weeks` and `--notes` override them, and anything unset is `unknown`. See the [research spec](docs/research-spec.md).
 Task files are written to `.task-data/tasks/` (git-ignored). Execution history: Temporal UI.
 
+## Real agents (optional)
+
+`EXECUTION_MODE=openai` runs the researcher and business owner on `gpt-6.1-sol` through the OpenAI API with web search for the researcher, a USD spending guard and call logging.
+Setup, the paid live check and its limits: [local development](docs/local-development.md#real-agents-optional-spends-money) and [ADR 7](docs/decisions/0007-openai-executor-and-spend-guard.md).
+
 ## Commands
 
 | Task                  | Command                                                                                              |
@@ -83,4 +88,5 @@ Task files are written to `.task-data/tasks/` (git-ignored). Execution history: 
 | Format / lint / types | `pnpm format` / `pnpm lint` / `pnpm typecheck`                                                       |
 | Build / unit tests    | `pnpm build` / `pnpm test` (builds first; no infra needed; `verify` does not run tests)              |
 | Integration tests     | `pnpm test:integration` (needs `pnpm infra:up`; uses its own temp database)                          |
+| Live OpenAI check     | `pnpm openai:check --confirm-spend` (spends real money, a few cents to about 1 USD; never run by CI) |
 | End-to-end smoke      | `pnpm smoke` (needs infra up + migrated)                                                             |

@@ -7,6 +7,7 @@ import {
   canonicalJson,
   toCanonicalObject,
   type AgentExecutor,
+  type AgentSpendLimit,
   type AgentRoleIO,
   type ExecutableRole,
   type Result,
@@ -20,6 +21,7 @@ import {
   type ExecutionRecord,
   type RunRepository,
 } from '@platform/persistence';
+import { assertWithinSpendLimits, type SpendPolicy } from './spend-guard.js';
 
 /**
  * What the surrounding Temporal Activity provides. Injected so the stage runner also works outside Temporal (tests);
@@ -41,6 +43,8 @@ export interface AgentStageDeps {
   persistAttempts?: number;
   now?: () => Date;
   runtime?: ActivityRuntime;
+  /** Set for paid executors: every call is checked against `AgentStageArgs.spendLimit` first. */
+  spendPolicy?: SpendPolicy;
 }
 
 export interface AgentStageArgs<R extends ExecutableRole> {
@@ -51,6 +55,8 @@ export interface AgentStageArgs<R extends ExecutableRole> {
   kind: ResultKind;
   resultId: string;
   input: AgentRoleIO[R]['input'];
+  /** The run's `limits.agentSpend`; checked before the call when the deps carry a spend policy. */
+  spendLimit?: AgentSpendLimit;
   /** Executor output is untrusted (model/API response): it is validated before anything is persisted. */
   validateOutput: (output: unknown) => AgentRoleIO[R]['output'];
 }
@@ -268,6 +274,21 @@ async function invokeAndPersist<R extends ExecutableRole>(
     await repo.releaseUninvokedClaim(executionId, token, fence);
     throw ApplicationFailure.retryable('cancelled before the executor started', CANCELLED_FAILURE);
   }
+  if (deps.spendPolicy) {
+    try {
+      await assertWithinSpendLimits(
+        repo,
+        args.runId,
+        args.spendLimit ?? 'unknown',
+        deps.spendPolicy,
+        (deps.now ?? (() => new Date()))(),
+      );
+    } catch (error) {
+      // Refused before anything started: give the claim back so a corrected budget can run the stage later.
+      await repo.releaseUninvokedClaim(executionId, token, fence);
+      throw error;
+    }
+  }
   try {
     await repo.markInvoked(executionId, token, fence);
   } catch (error) {
@@ -333,6 +354,7 @@ async function invokeAndPersist<R extends ExecutableRole>(
     executedBy: response.executedBy,
     costUsd: response.usage.costUsd,
     steps: response.usage.steps,
+    ...(response.usage.details && { callDetails: response.usage.details }),
     result,
   });
   if (persistFailure) {
@@ -362,6 +384,7 @@ async function persistWithRetries<R extends ExecutableRole>(
     executedBy: 'mock' | 'agent';
     costUsd: number;
     steps: number;
+    callDetails?: Record<string, string | number>;
     result: Result;
   },
 ): Promise<string | undefined> {

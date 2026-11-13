@@ -54,6 +54,14 @@ describe('platformConstraintsSchema', () => {
   });
 
   it.each([
+    [
+      'an agent allowance per run above the monthly one',
+      { limits: { agentSpend: { unit: 'usd', perRunUsd: 30, perMonthUsd: 20 } } },
+    ],
+    [
+      'a weekly allowance (no longer supported)',
+      { limits: { agentSpend: { unit: 'weekly-allowance', amount: 5 } } },
+    ],
     ['a removed field (teamSize)', { teamSize: 3 }],
     ['a negative budget', { limits: { buildBudgetUsd: -1 } }],
     ['a zero deadline', { limits: { launchDeadlineWeeks: 0 } }],

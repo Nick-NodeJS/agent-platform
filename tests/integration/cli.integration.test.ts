@@ -303,11 +303,27 @@ describe('CLI commands against live Temporal + Postgres', () => {
     expect(broken.code).toBe(1);
     expect(broken.out).toContain('FAIL temporal reachable');
     expect(broken.out).toContain(
-      'FAIL EXECUTION_MODE (openhands: real execution is not implemented',
+      'FAIL EXECUTION_MODE (openhands: not implemented, the worker will refuse to start)',
     );
     expect(broken.out).toContain('FAIL approval trusted signers configured');
     expect(broken.out).toContain('FAIL DATABASE_URL set');
     expect(broken.out).toContain('not found; only needed on the machine where a human approves');
+
+    const withoutKey = await cli(['doctor'], { EXECUTION_MODE: 'openai', OPENAI_API_KEY: '' });
+    expect(withoutKey.out).toContain('ok   EXECUTION_MODE (openai)');
+    expect(withoutKey.out).toContain('ok   model profiles valid');
+    expect(withoutKey.out).toContain('FAIL OPENAI_API_KEY set');
+    const withKey = await cli(['doctor'], {
+      EXECUTION_MODE: 'openai',
+      OPENAI_API_KEY: 'sk-doctor-test-0123456789abcdef',
+    });
+    expect(withKey.out).toContain('ok   OPENAI_API_KEY set');
+    expect(withKey.out).not.toContain('sk-doctor-test');
+    const badProfiles = await cli(['doctor'], {
+      EXECUTION_MODE: 'openai',
+      MODEL_PROFILES_FILE: path.join(env.keyDir, 'missing-profiles.json'),
+    });
+    expect(badProfiles.out).toContain('FAIL model profiles valid');
 
     await mkdir(path.join(env.keyDir, 'x'), { recursive: true });
     const unreadable = await cli(['doctor'], {

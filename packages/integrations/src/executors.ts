@@ -8,6 +8,7 @@ import {
   type AgentRunResponse,
   type ExecutableRole,
 } from '@platform/contracts';
+import { OpenAiAgentExecutor, type OpenAiExecutorOptions } from './openai/executor.js';
 
 type MockHandlers = {
   [R in ExecutableRole]: (input: AgentRoleIO[R]['input']) => AgentRoleIO[R]['output'];
@@ -103,6 +104,24 @@ export class OpenHandsAgentExecutor implements AgentExecutor {
   }
 }
 
-export function createExecutor(mode: 'mock' | 'openhands'): AgentExecutor {
-  return mode === 'mock' ? new MockAgentExecutor() : new OpenHandsAgentExecutor();
+export class ExecutorNotConfiguredError extends Error {}
+
+/** A mode is never replaced by the mock: a real mode without its configuration is an error. */
+export function createExecutor(
+  mode: 'mock' | 'openai' | 'openhands',
+  openai?: OpenAiExecutorOptions,
+): AgentExecutor {
+  switch (mode) {
+    case 'mock':
+      return new MockAgentExecutor();
+    case 'openai':
+      if (!openai) {
+        throw new ExecutorNotConfiguredError(
+          'EXECUTION_MODE=openai needs an API key and model profiles',
+        );
+      }
+      return new OpenAiAgentExecutor(openai);
+    case 'openhands':
+      return new OpenHandsAgentExecutor();
+  }
 }

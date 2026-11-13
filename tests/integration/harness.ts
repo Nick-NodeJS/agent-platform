@@ -75,6 +75,8 @@ export class CountingExecutor implements AgentExecutor {
   failure: Error | undefined;
   private readonly inner = new MockAgentExecutor();
 
+  /** Replaces the mock's zero-cost usage, like a paid executor reporting what a call cost. */
+  usageOverride: AgentRunResponse<unknown>['usage'] | undefined;
   /** True once a call was interrupted through its abort signal. */
   sawAbort = false;
 
@@ -90,7 +92,8 @@ export class CountingExecutor implements AgentExecutor {
     if (this.failure) {
       throw this.failure;
     }
-    return this.inner.run(request);
+    const response = await this.inner.run(request);
+    return this.usageOverride ? { ...response, usage: this.usageOverride } : response;
   }
 
   /** Waits for `wait` (if any) but rejects as soon as the signal aborts, like a well-behaved provider client. */
@@ -241,11 +244,15 @@ export const constraints: PlatformConstraints = platformConstraintsSchema.parse(
 export const newRunId = (prefix = 'it') => `${prefix}-${randomUUID().slice(0, 10)}`;
 
 /** Starts a run exactly like the CLI does: only a failed (undecided) execution of the same id may be restarted. */
-export async function startRun(env: Env, runId = newRunId()) {
+export async function startRun(
+  env: Env,
+  runId = newRunId(),
+  runConstraints: PlatformConstraints = constraints,
+) {
   await env.client.workflow.start(WORKFLOW_NAME, {
     workflowId: runId,
     taskQueue: env.taskQueue,
-    args: [{ runId, goal: 'integration test goal', constraints }],
+    args: [{ runId, goal: 'integration test goal', constraints: runConstraints }],
     workflowIdReusePolicy: WorkflowIdReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
     workflowIdConflictPolicy: WorkflowIdConflictPolicy.FAIL,
   });

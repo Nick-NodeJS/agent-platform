@@ -269,3 +269,31 @@ Baseline: `522f2b6` (CI run #9 successful). Finding as reported: Activity timeou
 **Replay:** the workflow changed only its Activity options for the two agent stages. 100 of 100 completed local histories still replay against the new bundle.
 
 **Remaining limits:** the 10-minute stage timeout, 8-minute call limit and 30 s heartbeat timeout are fixed constants, not per-model settings. Real providers still have to honor the signal (Step 3 executors). A call cut off by cancellation or timeout needs the operator's `reconcile`, by design.
+
+## Step 3: direct OpenAI executor, spending guard, tool restriction, call logging (2026-11-13)
+
+Baseline: `55c4d3f` (F2 fix; local at the time, not yet confirmed on `origin`). Decisions and design: [ADR 7](decisions/0007-openai-executor-and-spend-guard.md).
+
+**What changed.** `OpenAiAgentExecutor` (Responses API via `fetch`, no new dependency): strict JSON schema, web search for the researcher only, hard token and tool-call ceilings, `store: false`,
+call time limit under the stage timeout, citations taken from the tool's annotations, cost from reported usage and the price list in `config/model-profiles.json`. `limits.agentSpend` is now USD per run and per UTC month
+(3 and 20 in `config/platform-constraints.json`). `assertWithinSpendLimits` runs before every paid call in `runAgentStage` and fails closed (`BudgetNotConfigured`, `BudgetExceeded`), counting `uncertain` executions at
+an assumed cost. `EXECUTION_MODE=openai` is accepted by the worker (key from the environment, profiles validated at start); OpenHands is still refused. Completed calls store an `agent.call.completed` event in the result transaction.
+`pnpm openai:check --confirm-spend` is an opt-in paid check that persists nothing.
+
+**Tests added (executed):** executor against a fake HTTP provider (request shape, tool restriction per role, key never in the body or in error text, output mapping, citations, cost, error classification for 400/401/403/429 versus 5xx,
+incomplete, refusal, invalid JSON, missing usage, timeout, abort, unreachable host, unpriced model), cost arithmetic (cached, long-context, search fee), JSON schema versus Zod key alignment, model profile validation,
+spending guard against Postgres (boundary, per-run, per-month, earlier months ignored, uncertain counted, unknown allowance, claim released), call details stored once, an end-to-end flow through Temporal and Postgres with the
+fake provider (results, cost, events, fail-closed and per-run exhaustion before the second call), `doctor` for the openai mode, worker environment checks.
+
+| Check                                           | Result                                                                        |
+| ----------------------------------------------- | ----------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile`, `pnpm verify` | passed                                                                        |
+| `pnpm test` (unit)                              | 153 tests in 13 files passed                                                  |
+| `pnpm test:coverage` (unit + live integration)  | 227 tests in 21 files passed; **90.87% lines, 84.26% branches** (floor 80/80) |
+| `pnpm smoke` (mock mode)                        | passed                                                                        |
+| Workflow replay                                 | not re-run: the workflow and Activity names did not change in this step       |
+
+**Not verified.** Nothing has been run against the live OpenAI API: request and response field names (`max_tool_calls`, `text.format`, `usage` details, annotations) follow the provider's documentation
+as read on 2026-11-13 but only a fake provider validated the code. The first paid `pnpm openai:check --confirm-spend` is the owner's step and may reveal a mismatch. The token and cost figures in the cost estimate given to the owner
+(about 0.75 USD per run) are assumptions until measured. A single call can overshoot what is left of a budget; the provider-side project limit is the outer boundary and is not set by the platform.
+CI for the new commit has not been observed.

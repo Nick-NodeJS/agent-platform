@@ -1,9 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { ApplicationFailure, WorkflowFailedError } from '@temporalio/client';
 import {
   ExecutorNotStartedError,
   researchProposalSchema,
+  type AgentSpendLimit,
   taskSchema,
   type Result,
   type TaskStore,
@@ -619,5 +620,147 @@ describe('durable agent executions and Activity retries (live Temporal + Postgre
     const next = await runAgentStage(stageDeps(executor), researchStage(runId));
     expect(next.reused).toBe(false);
     expect(executor.count()).toBe(1);
+  });
+
+  it('stores the cost and the call details (model, tokens, ids) with the result, once', async () => {
+    const runId = await seededRun('details');
+    const executor = new CountingExecutor();
+    executor.usageOverride = {
+      costUsd: 0.42,
+      steps: 3,
+      details: { model: 'test-model', responseId: 'resp_9', inputTokens: 1200, webSearchCalls: 2 },
+    };
+
+    await runAgentStage(stageDeps(executor), researchStage(runId));
+    await runAgentStage(stageDeps(executor), researchStage(runId)); // pure reuse
+
+    const summary = await repo.getRunSummary(runId);
+    expect(summary?.totalCostUsd).toBe(0.42);
+    const events = await env.db.query(
+      `SELECT data FROM execution_events WHERE run_id=$1 AND type='agent.call.completed'`,
+      [runId],
+    );
+    expect(events.rows).toEqual([
+      {
+        data: {
+          role: 'researcher',
+          executionId: executionIdFor(runId, 'researcher', 'research'),
+          attempts: 1,
+          costUsd: 0.42,
+          steps: 3,
+          model: 'test-model',
+          responseId: 'resp_9',
+          inputTokens: 1200,
+          webSearchCalls: 2,
+        },
+      },
+    ]);
+    expect(executor.count()).toBe(1);
+  });
+
+  describe('spending guard before paid calls', () => {
+    const SPEND: AgentSpendLimit = { unit: 'usd', perRunUsd: 3, perMonthUsd: 20 };
+    const policy = { minRemainingBudgetUsd: 0.5, assumedUncertainCostUsd: 1 };
+    const OLD_ENTRY_AGE_DAYS = 40;
+
+    const guarded = (runId: string, limit: AgentSpendLimit = SPEND) => ({
+      ...researchStage(runId),
+      spendLimit: limit,
+    });
+    const guardedDeps = (executor: CountingExecutor) => ({
+      ...stageDeps(executor),
+      spendPolicy: policy,
+    });
+    const record = async (runId: string, costUsd: number, daysAgo = 0) => {
+      const entryId = `cost-${randomUUID()}`;
+      await repo.insertCost({ entryId, runId, role: 'researcher', costUsd, steps: 1 });
+      await env.db.query(
+        `UPDATE cost_entries SET created_at = now() - make_interval(days => $2) WHERE entry_id=$1`,
+        [entryId, daysAgo],
+      );
+    };
+    const outcomeOf = (attempt: Promise<unknown>) =>
+      attempt.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    const expectRefusedWithoutStarting = async (
+      runId: string,
+      executor: CountingExecutor,
+      type: string,
+      limit: AgentSpendLimit = SPEND,
+    ) => {
+      const outcome = await outcomeOf(runAgentStage(guardedDeps(executor), guarded(runId, limit)));
+      expect(outcome).toMatchObject({ type, nonRetryable: true });
+      expect(executor.count()).toBe(0);
+      expect(await execution(runId, 'researcher', 'research')).toMatchObject({
+        state: 'pending',
+        attempts: 0,
+        invokedAt: null,
+        leaseOwner: null,
+      });
+    };
+
+    beforeEach(async () => {
+      await env.db.query('DELETE FROM cost_entries');
+    });
+
+    it('lets a call start with enough budget left, up to the minimum remaining amount', async () => {
+      const runId = await seededRun('spend-ok');
+      await record(runId, 2.5); // exactly 0.5 left in the run: still allowed
+      const executor = new CountingExecutor();
+
+      const result = await runAgentStage(guardedDeps(executor), guarded(runId));
+
+      expect(result.reused).toBe(false);
+      expect(executor.count()).toBe(1);
+    });
+
+    it('refuses to start when the per-run budget is used up, and gives the claim back', async () => {
+      const runId = await seededRun('spend-run');
+      await record(runId, 2.6); // 0.4 left, below the 0.5 minimum
+      await expectRefusedWithoutStarting(runId, new CountingExecutor(), 'BudgetExceeded');
+    });
+
+    it('refuses to start when this month is used up by other runs, but ignores earlier months', async () => {
+      const runId = await seededRun('spend-month');
+      const otherRun = await seededRun('spend-month-other');
+      await record(otherRun, 19, OLD_ENTRY_AGE_DAYS);
+      const executor = new CountingExecutor();
+      expect((await runAgentStage(guardedDeps(executor), guarded(runId))).reused).toBe(false);
+
+      const secondRun = await seededRun('spend-month-two');
+      await record(otherRun, 19.6);
+      await expectRefusedWithoutStarting(secondRun, new CountingExecutor(), 'BudgetExceeded');
+    });
+
+    it('counts an uncertain execution as spent, since its real cost is unknown', async () => {
+      const failing = new CountingExecutor();
+      failing.failure = new Error('connection reset after the request was sent');
+      const uncertainRun = await seededRun('spend-uncertain');
+      expect(
+        await outcomeOf(runAgentStage(guardedDeps(failing), guarded(uncertainRun))),
+      ).toMatchObject({
+        type: 'ExecutionOutcomeUncertain',
+      });
+      const otherRun = await seededRun('spend-uncertain-other');
+      await record(otherRun, 18.8); // 18.8 + 1 assumed = 19.8: only 0.2 left of the monthly 20
+
+      await expectRefusedWithoutStarting(
+        await seededRun('spend-uncertain-next'),
+        new CountingExecutor(),
+        'BudgetExceeded',
+      );
+    });
+
+    it('refuses real execution when the agent allowance is unknown (fail closed)', async () => {
+      const runId = await seededRun('spend-unknown');
+      await expectRefusedWithoutStarting(
+        runId,
+        new CountingExecutor(),
+        'BudgetNotConfigured',
+        'unknown',
+      );
+    });
   });
 });

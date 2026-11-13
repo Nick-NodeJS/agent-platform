@@ -15,3 +15,13 @@ Reset: `pnpm infra:down` keeps data; `docker compose --project-directory . -f in
 Runtime output (`.task-data/`, logs, `.env`) is git-ignored.
 
 After pulling changes with new migrations run `pnpm db:migrate` (additive; existing data is kept). Runs started before the signed-approval change are not replay-compatible: start new runs.
+
+## Real agents (optional, spends money)
+
+1. Set `EXECUTION_MODE=openai` and `OPENAI_API_KEY=...` in the worker's environment (`.env` is git-ignored). Models, ceilings and prices are in `config/model-profiles.json`;
+   limits and the agent allowance (`limits.agentSpend`, 3 USD per run and 20 USD per month) are in `config/platform-constraints.json`.
+2. In the OpenAI dashboard set a project spend limit as the outer boundary: the platform's guard stops new calls but cannot stop one call mid-way.
+3. `pnpm build && pnpm openai:check --confirm-spend` makes one researcher and one business-owner call (searches capped at 3) and prints cost, tokens and the limit checks. It writes nothing
+   to the database. It is the only check that touches the live API; CI never calls it.
+4. `pnpm doctor` reports the mode, whether the profiles file is valid and whether the key variable is set (name only). Then `pnpm worker:start` and the usual `pnpm cli start ...`;
+   `pnpm cli executions <run>` shows the cost of each call.
