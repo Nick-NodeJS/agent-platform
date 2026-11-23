@@ -42,6 +42,7 @@ describe('platformConstraintsSchema', () => {
     });
     expect(parsed.hosting).toEqual({
       preferredProvider: 'aws',
+      candidateProviders: [],
       allowedProviders: 'any',
       productionGradeRequired: true,
     });

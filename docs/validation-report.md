@@ -313,3 +313,16 @@ The owner set `OPENAI_API_KEY` and a 20 USD monthly project limit in the OpenAI 
 
 Still unverified: the calculated cost against the provider's billing page (the owner can compare the dashboard usage with 0.11 USD), the behavior of long or rate-limited runs, and a full workflow run (worker, Temporal, Postgres, gate) with real agents.
 The proposal's revenue and break-even came back `unknown`, so a minimum-margin rule would currently fail such a proposal; the prompt asks for honest estimates and allows `null`.
+
+### Full run with real agents (2026-11-23)
+
+Two complete runs through the worker (`EXECUTION_MODE=openai`), Temporal, Postgres and the review gate, same goal, no approval given (both runs wait at the gate):
+
+| Run          | Prompt                                                    | Cost (researcher + owner)    | Outcome                                                                                                                                                                                                     |
+| ------------ | --------------------------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `real-run-1` | first version                                             | 0.1095 + 0.0090 = 0.1185 USD | proposal costed around 60-80 unpaid owner hours; owner recommended `do-not-proceed` (score 6)                                                                                                               |
+| `real-run-2` | agents build the product, no human labor, compare hosting | 0.1897 + 0.0133 = 0.2030 USD | no human labor costed; compared AWS, Cloudflare, Fly.io, Render, Vercel and Supabase with cited prices and kept AWS (Cloudflare not clearly cheaper); 25 evidence entries; owner `do-not-proceed` (score 6) |
+
+Each call ran once (attempts 1), results, cost entries and `agent.call.completed` events were stored, all applicable platform checks passed, and no spending-guard refusal occurred. The cost per run stays far below the 3 USD cap.
+Observed: in both runs the business owner asks for demand validation before delivery, so "do-not-proceed" currently stands for "validate first"; a separate outcome is proposed but not built. The provider prices in a proposal are the model's reading of public pages and
+are not verified by the platform; they are checked by the owner at the implementation gate. Billing was not compared with the provider dashboard.

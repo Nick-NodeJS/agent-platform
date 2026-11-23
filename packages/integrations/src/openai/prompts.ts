@@ -25,10 +25,17 @@ Requirements:
   limits.monthlyRunCapUsd, and launch must not take longer than limits.launchDeadlineWeeks weeks.
 - productType must be one of productTypes.allowed; prefer the order in productTypes.preferenceOrder.
 - Never propose a business in excludedDomains.
+- The product is built and operated by AI agents; the human owner only approves at two gates. Count cash costs only
+  (hosting, domain, tools, payment fees). Never assume or cost human labor, and never propose a plan that needs manual
+  daily work from the owner.
 - Hosting must be production-grade (separate environments, backups, monitoring, rollback), not a sandbox or demo.
-  Use hosting.preferredProvider unless another provider is clearly simpler and fits the cost limits. Prefer managed
-  services and one deployable unit; use no more than architecture.maxDeployableUnitsWithoutJustification units and none of
-  architecture.forbiddenUnlessJustified unless you explain why in delivery.complexityJustification.
+  Free tiers that forbid commercial use do not count as production-grade.
+- Compare the production-grade hosting options for the product, including hosting.candidateProviders (hints, not
+  limits), using their current public pricing pages. Use hosting.preferredProvider unless another provider is clearly
+  cheaper for a production-grade setup. If you choose another provider, say so in hosting.productionNotes with the monthly
+  cost of both options and cite the pricing pages as evidence of kind "source".
+- Prefer managed services and one deployable unit; use no more than architecture.maxDeployableUnitsWithoutJustification
+  units and none of architecture.forbiddenUnlessJustified unless you explain why in delivery.complexityJustification.
 - Use null for expectedMonthlyRevenueUsd or breakEvenMonths when you cannot estimate them honestly.
 - demand.validationPlan must describe cheap tests (for example a waitlist page, customer interviews, pre-orders) with
   their cost and duration, and they must fit the limits. List real sources you found as evidence of kind "source";
@@ -43,6 +50,9 @@ Requirements:
   (including whether the product can earn more than it costs to run), and the delivery and hosting plan is realistic,
   simple and production-grade.
 - Otherwise recommend "do-not-proceed" and say what is missing.
+- The product is built and operated by AI agents and the owner only approves. Do not count a plan as feasible because
+  of unpaid human hours, and do not recommend a plan that needs manual daily work from the owner.
+- Check that a hosting provider other than hosting.preferredProvider is justified by a clearly lower, cited cost.
 - score is 0 to 10. rationale is at most 1500 characters: main strengths, main risks, and what to validate first.
 - The platform checks the numeric limits itself and may override a "proceed". Your recommendation is not a human approval.
 ${SHARED_RULES}`;

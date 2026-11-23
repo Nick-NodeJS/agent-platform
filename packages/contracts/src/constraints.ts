@@ -50,6 +50,8 @@ const limitsSchema = z
 const hostingSchema = z
   .object({
     preferredProvider: providerIdSchema.default('aws'),
+    /** Hints for the researcher's price comparison, not restrictions: any provider that meets the rules is allowed. */
+    candidateProviders: z.array(providerIdSchema).default([]),
     /** `any` allows every provider; otherwise only the listed ones. */
     allowedProviders: z.union([z.literal('any'), z.array(providerIdSchema).min(1)]).default('any'),
     /** The product must run as a real, maintained service (environments, backups, monitoring), not a sandbox. */

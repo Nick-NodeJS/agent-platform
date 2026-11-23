@@ -9,6 +9,7 @@
   },
   "hosting": {
     "preferredProvider": "aws",
+    "candidateProviders": ["aws", "cloudflare", "vercel", "fly-io", "render", "supabase"],
     "allowedProviders": "any",
     "productionGradeRequired": true
   },
