@@ -86,5 +86,5 @@ Mock mode stays the default and is free.
 
 ## Not implemented yet
 
-Automatic stop on "do-not-proceed" without a human step; the go-live gate; real runs exercised against the live API (only a fake provider has been used so far);
+Automatic stop on "do-not-proceed" without a human step; the go-live gate; a full workflow run with real agents (only one live probe of the two calls has been made, see the validation report);
 demand-test execution and post-launch metrics; provider-side usage reconciliation (cost is computed from reported usage and a hand-maintained price list).

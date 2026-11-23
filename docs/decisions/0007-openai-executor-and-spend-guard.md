@@ -1,7 +1,6 @@
 # ADR 0007: Direct OpenAI executor with a platform-side spending guard
 
-**Status:** Accepted (owner decision, 2026-11-13). **Implemented and tested against a fake provider only;** it has not yet been
-run against the live API (see the validation report). Builds on [ADR 5](0005-direct-api-research-first.md) and [ADR 6](0006-limits-and-two-human-gates.md).
+**Status:** Accepted (owner decision, 2026-11-13). **Implemented; tested against a fake provider and probed once against the live API on 2026-11-23** (see the validation report); no full workflow run with real agents yet. Builds on [ADR 5](0005-direct-api-research-first.md) and [ADR 6](0006-limits-and-two-human-gates.md).
 
 ## Context
 

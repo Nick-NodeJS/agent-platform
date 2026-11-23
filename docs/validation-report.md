@@ -297,3 +297,19 @@ fake provider (results, cost, events, fail-closed and per-run exhaustion before 
 as read on 2026-11-13 but only a fake provider validated the code. The first paid `pnpm openai:check --confirm-spend` is the owner's step and may reveal a mismatch. The token and cost figures in the cost estimate given to the owner
 (about 0.75 USD per run) are assumptions until measured. A single call can overshoot what is left of a budget; the provider-side project limit is the outer boundary and is not set by the platform.
 CI for the new commit has not been observed.
+
+### Live probe of the OpenAI executor (2026-11-23)
+
+The owner set `OPENAI_API_KEY` and a 20 USD monthly project limit in the OpenAI dashboard, then `pnpm openai:check --confirm-spend` was run once (nothing persisted, searches capped at 3).
+
+| Item                | Result                                                                                                                |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Request accepted    | yes: strict JSON schema, `web_search`, `max_tool_calls`, `reasoning.effort` and `store: false` raised no error        |
+| Response parsed     | yes: usage, output text, 2 search calls and citations were read; the proposal passed `researchProposalSchema`         |
+| Researcher call     | 22,515 input and 3,676 output tokens, 2 searches, 112 s, calculated cost 0.1018 USD; 19 evidence entries              |
+| Business-owner call | 3,118 input and 406 output tokens, 15 s, calculated cost 0.0103 USD; recommendation `do-not-proceed`, score 5         |
+| Platform checks     | all applicable rules passed; unset limits (excluded domains, minimum margin) reported `not-applicable`                |
+| Total               | 0.1121 USD calculated, against about 0.75 USD estimated beforehand: the token estimate was roughly ten times too high |
+
+Still unverified: the calculated cost against the provider's billing page (the owner can compare the dashboard usage with 0.11 USD), the behavior of long or rate-limited runs, and a full workflow run (worker, Temporal, Postgres, gate) with real agents.
+The proposal's revenue and break-even came back `unknown`, so a minimum-margin rule would currently fail such a proposal; the prompt asks for honest estimates and allows `null`.
